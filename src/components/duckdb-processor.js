@@ -54,7 +54,14 @@ export class DuckDBDataProcessor {
     `;
 
     const result = await this.conn.query(query);
-    const type = result.toArray()[0].col_type.toLowerCase();
+    const resultArray = result.toArray(); // Get the array
+
+    if (resultArray.length === 0) {
+      // Handle the case where the result set is empty
+      return "ordinal"; // Or some other default type
+    }
+
+    const type = resultArray[0].col_type.toLowerCase();
 
     if (type.includes("float") || type.includes("integer")) return "continuous";
     if (type.includes("date") || type.includes("timestamp")) return "date";
@@ -104,7 +111,20 @@ export class DuckDBDataProcessor {
                           WHERE ${column} IS NOT NULL
                           LIMIT 1`;
         const typeResult = await this.logQuery(typeQuery, "Get Column Type");
-        const colType = typeResult.toArray()[0].col_type;
+        // const colType = typeResult.toArray()[0].col_type;
+        // const numericType = this.getDuckDBType(colType);\
+        const typeArray = typeResult.toArray(); // Get the array of results
+        const colType = typeArray.length > 0 ? typeArray[0].col_type : null; // Check if there are results
+
+        // Handle null colType
+        if (!colType) {
+          console.warn(
+            `Column ${column} has no non-null values, defaulting to ordinal type.`
+          );
+          // If there are no non-null values, default to ordinal type
+          return this.binDataWithDuckDB(column, "ordinal", maxOrdinalBins);
+        }
+
         const numericType = this.getDuckDBType(colType);
 
         query = `
@@ -171,7 +191,9 @@ export class DuckDBDataProcessor {
         break;
     }
 
+    console.log("DuckDB Query:", query);
     const result = await this.conn.query(query);
+    console.log("DuckDB Result:", result);
     let bins = result.toArray().map((row) => ({
       ...row,
       x0: type === "date" ? new Date(row.x0) : row.x0,
@@ -406,6 +428,113 @@ export class DuckDBDataProcessor {
   async dropTable() {
     if (this.conn) {
       await this.conn.query(`DROP TABLE IF EXISTS ${this.tableName}`);
+    }
+  }
+
+  async aggregateData({ column, aggregation = "SUM", groupBy = null }) {
+    // Constructs a query to perform an aggregation (e.g., SUM, AVG, COUNT, etc.)
+    // Optionally grouped by a provided column
+    let query;
+    if (groupBy) {
+      query = `
+        SELECT ${groupBy} as group_key, ${aggregation}(${column}) as aggregate_value
+        FROM ${this.tableName}
+        GROUP BY ${groupBy}
+        ORDER BY aggregate_value DESC
+      `;
+    } else {
+      query = `
+        SELECT ${aggregation}(${column}) as aggregate_value
+        FROM ${this.tableName}
+      `;
+    }
+
+    try {
+      const result = await this.conn.query(query);
+      return result.toArray();
+    } catch (error) {
+      throw new Error(`Aggregation query failed: ${error.message}`);
+    }
+  }
+
+  async getSummaryStatistics(column) {
+    // Returns basic summary statistics for a numeric column using DuckDB's native functions
+    const query = `
+      SELECT 
+        COUNT(${column}) as count,
+        AVG(${column}) as avg,
+        MIN(${column}) as min,
+        MAX(${column}) as max,
+        STDDEV(${column}) as stddev
+      FROM ${this.tableName}
+      WHERE ${column} IS NOT NULL
+    `;
+    try {
+      const result = await this.conn.query(query);
+      return result.toArray()[0];
+    } catch (error) {
+      throw new Error(`Summary statistics query failed: ${error.message}`);
+    }
+  }
+
+  async getSortedData({ sortColumns, order = "ASC" }) {
+    // sortColumns: Array of column names
+    const orderBy = sortColumns.map((col) => `${col} ${order}`).join(", ");
+    const query = `
+      SELECT *
+      FROM ${this.tableName}
+      ORDER BY ${orderBy}
+    `;
+    try {
+      const result = await this.conn.query(query);
+      return result.toArray();
+    } catch (error) {
+      throw new Error(`Sorting query failed: ${error.message}`);
+    }
+  }
+
+  async getFilteredData(filterClause) {
+    // filterClause: a valid SQL WHERE clause (e.g., "age > 30 AND status = 'active'")
+    const query = `
+      SELECT *
+      FROM ${this.tableName}
+      WHERE ${filterClause}
+    `;
+    try {
+      const result = await this.conn.query(query);
+      return result.toArray();
+    } catch (error) {
+      throw new Error(`Filtering query failed: ${error.message}`);
+    }
+  }
+
+  async getDataPage({
+    page = 0,
+    pageSize = 100,
+    sortColumns = [],
+    order = "ASC",
+    filterClause = "1=1",
+  }) {
+    // Lazy loading / pagination
+    const offset = page * pageSize;
+    let orderBy = "";
+    if (sortColumns.length) {
+      orderBy = `ORDER BY ${sortColumns
+        .map((col) => `${col} ${order}`)
+        .join(", ")}`;
+    }
+    const query = `
+      SELECT *
+      FROM ${this.tableName}
+      WHERE ${filterClause}
+      ${orderBy}
+      LIMIT ${pageSize} OFFSET ${offset}
+    `;
+    try {
+      const result = await this.conn.query(query);
+      return result.toArray();
+    } catch (error) {
+      throw new Error(`Pagination query failed: ${error.message}`);
     }
   }
 }
