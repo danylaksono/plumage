@@ -9,9 +9,8 @@ export class SmallMultiplesHistogram extends BaseVisualization {
       columns: [], // Array of column names for histograms
       histogramWidth: 200, // Individual histogram width
       histogramHeight: 150, // Individual histogram height
-      margin: { top: 10, right: 10, bottom: 30, left: 30 },
-      // dataSource: null,     // Data source (if not already loaded in Base)
-      // dataFormat: null,    // Data format
+      margin: { top: 40, right: 10, bottom: 30, left: 30 }, // Increased top margin for title
+      showTitle: true, // Option to show/hide titles
     };
 
     super({ ...smallMultiplesDefaults, ...config });
@@ -33,7 +32,7 @@ export class SmallMultiplesHistogram extends BaseVisualization {
   }
 
   async createHistograms() {
-    const { columns, histogramWidth, histogramHeight } = this.config;
+    const { columns, histogramWidth, histogramHeight, showTitle } = this.config;
 
     if (!columns || columns.length === 0) {
       console.warn("No columns specified for SmallMultiplesHistogram.");
@@ -69,7 +68,10 @@ export class SmallMultiplesHistogram extends BaseVisualization {
         dataProcessor: this.dataProcessor,
         axis: true,
         tableName: this.tableName,
-        margin: this.config.margin, // Share the margin
+        margin: {
+          ...this.config.margin,
+          top: showTitle ? 20 : this.config.margin.top // Reduce top margin if title is shown
+        }
       };
 
       const histogram = new Histogram(histogramConfig);
@@ -79,8 +81,28 @@ export class SmallMultiplesHistogram extends BaseVisualization {
         .append("g")
         .attr("transform", `translate(${xOffset},${yOffset})`)
         .attr("class", `histogram-group histogram-group-${column}`); // Unique class for each histogram
-      // Set the 'g' element to the histogram instance.
-      histogram.g = histogramGroup;
+
+      // Add title if showTitle is true
+      if (showTitle) {
+        histogramGroup
+          .append("text")
+          .attr("class", "histogram-title")
+          .attr("x", histogramWidth / 2)
+          .attr("y", this.config.margin.top / 2) // Position halfway in the top margin
+          .attr("text-anchor", "middle")
+          .attr("dominant-baseline", "middle") // Center vertically
+          .attr("font-size", "12px")
+          .attr("font-weight", "bold")
+          .text(column);
+      }
+
+      // Position the histogram content group below the title
+      const contentGroup = histogramGroup
+        .append("g")
+        .attr("transform", `translate(${this.config.margin.left},${this.config.margin.top})`);
+
+      // Set the content group as the histogram's main group
+      histogram.g = contentGroup;
 
       await histogram.initialize(); // Make sure you call the individual initialize
       await histogram.update();

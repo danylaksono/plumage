@@ -26,10 +26,10 @@ display(smallMultiples.svg.node());
 
 ```js
 // // Listen for selection changes
-// histogram.on("selectionChanged", (selectedData) => {
-//   console.log("Selected points:", selectedData);
-//   display(selectedData);
-// });
+smallMultiples.on("selectionChanged", (selectedData) => {
+  console.log("Selected points:", selectedData);
+  display(selectedData);
+});
 ```
 
 ```js
