@@ -11,6 +11,7 @@ export class SmallMultiplesHistogram extends BaseVisualization {
       histogramHeight: 150, // Individual histogram height
       margin: { top: 40, right: 10, bottom: 30, left: 30 }, // Increased top margin for title
       showTitle: true, // Option to show/hide titles
+      showAxis: false, // Option to show/hide axes
     };
 
     super({ ...smallMultiplesDefaults, ...config });
@@ -66,12 +67,12 @@ export class SmallMultiplesHistogram extends BaseVisualization {
         dataSource: this.config.dataSource, // Share the data source
         dataFormat: this.config.dataFormat,
         dataProcessor: this.dataProcessor,
-        axis: true,
+        axis: this.config.showAxis,
         tableName: this.tableName,
         margin: {
           ...this.config.margin,
-          top: showTitle ? 20 : this.config.margin.top // Reduce top margin if title is shown
-        }
+          top: showTitle ? 20 : this.config.margin.top, // Reduce top margin if title is shown
+        },
       };
 
       const histogram = new Histogram(histogramConfig);
@@ -92,14 +93,17 @@ export class SmallMultiplesHistogram extends BaseVisualization {
           .attr("text-anchor", "middle")
           .attr("dominant-baseline", "middle") // Center vertically
           .attr("font-size", "12px")
-          .attr("font-weight", "bold")
+          // .attr("font-weight", "bold")
           .text(column);
       }
 
       // Position the histogram content group below the title
       const contentGroup = histogramGroup
         .append("g")
-        .attr("transform", `translate(${this.config.margin.left},${this.config.margin.top})`);
+        .attr(
+          "transform",
+          `translate(${this.config.margin.left},${this.config.margin.top})`
+        );
 
       // Set the content group as the histogram's main group
       histogram.g = contentGroup;

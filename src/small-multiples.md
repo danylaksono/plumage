@@ -9,9 +9,10 @@ import { SmallMultiplesHistogram } from "./components/small-multiples-histogram.
 const smallMultiples = new SmallMultiplesHistogram({
   width: 600,
   height: 400,
-  columns: ["age", "income", "score"],
+  columns: ["age", "income", "score", "gender", "city"],
   colors: ["steelblue", "orange"],
   selectionMode: "drag",
+  axis: false,
   dataSource: data,
   // showLabelsBelow: true,
   dataFormat: "json", // or "csv" or "parquet"
