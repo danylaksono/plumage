@@ -22,6 +22,9 @@ const histogram = new Histogram({
 await histogram.initialize();
 await histogram.update();
 
+// await histogram.highlightData([1, 2, 3, 5, 7]);
+await histogram.highlightDataByValue([30000, 40000, 50000]);
+
 display(histogram.svg.node());
 ```
 
