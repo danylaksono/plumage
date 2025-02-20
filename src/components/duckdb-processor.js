@@ -191,9 +191,9 @@ export class DuckDBDataProcessor {
         break;
     }
 
-    console.log("DuckDB Query:", query);
+    // console.log("DuckDB Query:", query);
     const result = await this.conn.query(query);
-    console.log("DuckDB Result:", result);
+    // console.log("DuckDB Result:", result);
     let bins = result.toArray().map((row) => ({
       ...row,
       x0: type === "date" ? new Date(row.x0) : row.x0,
