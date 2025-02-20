@@ -345,6 +345,9 @@ export class Histogram extends BaseVisualization {
 
     // If we have highlighted data, draw the original data in grey first
     if (this.highlightedData) {
+        // Clear ALL existing elements first
+        this.g.selectAll(".brush, .bar").remove();
+
         // Create bins for highlighted data first
         const highlightedBins = this.createBinsFromData(this.highlightedData);
 
@@ -366,7 +369,7 @@ export class Histogram extends BaseVisualization {
             .attr("stroke", "white")
             .attr("stroke-width", "1");
 
-        // Draw highlighted bars
+        // Draw highlighted bars with selection-aware coloring
         const highlightBars = this.g.selectAll(".highlight-bar")
             .data(highlightedBins)
             .enter()
@@ -379,12 +382,25 @@ export class Histogram extends BaseVisualization {
                 const h = height - yScale(Number(b.length || 0));
                 return isNaN(h) ? 0 : h; // Return 0 height if NaN
             })
-            .attr("fill", this.config.colors[0])
+            .attr("fill", (b) => {
+                // Check if bin is selected
+                const originalBin = this.bins.find(ob => 
+                    ob.x0 === b.x0 && ob.x1 === b.x1
+                );
+                return this.selectedBins.has(originalBin) 
+                    ? this.config.colors[1] 
+                    : this.config.colors[0];
+            })
             .attr("stroke", "white")
             .attr("stroke-width", "1")
             .on("mouseover", (event, d) => this.handleMouseOver(event, d))
             .on("mouseout", (event, d) => this.handleMouseOut(event, d))
             .on("click", (event, d) => this.handleClick(event, d));
+
+        // Re-add brush last, ensuring proper cleanup
+        if (this.config.selectionMode === "drag") {
+            this.setupBrush();
+        }
     } else {
         // Original drawing code for normal state
         const bars = this.g.selectAll(".bar")
@@ -532,33 +548,42 @@ export class Histogram extends BaseVisualization {
   }
 
   handleBrush(event) {
+    // Clear existing selection if brush is removed
     if (!event.selection) {
-      this.clearSelection();
-      return;
+        this.clearSelection();
+        return;
     }
 
     const [x0, x1] = event.selection;
     const selected = this.bins.filter((b) => {
-      const binLeft = this.xScale(b.x0);
-      const binRight = this.xScale(b.x1);
-      return binLeft <= x1 && binRight >= x0;
+        const binLeft = this.xScale(b.x0);
+        const binRight = this.xScale(b.x1);
+        return binLeft <= x1 && binRight >= x0;
     });
 
     this.selectedBins = new Set(selected);
+    
+    // Redraw bars to update colors
     this.drawBars();
 
     // Get selected data and dispatch when ready
     this.getSelectedData().then((selectedData) => {
-      this.dispatch.call("selectionChanged", this, selectedData);
+        this.dispatch.call("selectionChanged", this, selectedData);
     });
-  }
+}
 
   clearSelection() {
     this.selectedBins.clear();
+    
+    // Remove brush selection AND brush element
+    if (this.config.selectionMode === "drag") {
+        this.g.selectAll(".brush").remove();
+        this.setupBrush(); // Re-create brush with no selection
+    }
+    
     this.drawBars();
-    // Return empty array immediately since there's no selection
     this.dispatch.call("selectionChanged", this, []);
-  }
+}
 
   reset() {
     this.selectedBins.clear();
@@ -738,5 +763,18 @@ export class Histogram extends BaseVisualization {
         this.highlightedData = null;
         this.drawBars();
     }
+}
+
+  setupBrush() {
+    // Remove any existing brush first
+    this.g.selectAll(".brush").remove();
+    
+    // Add brush to a new top-level group
+    const brushGroup = this.g
+        .append("g")
+        .attr("class", "brush")
+        .style("pointer-events", "all");
+    
+    brushGroup.call(this.brush);
 }
 }
