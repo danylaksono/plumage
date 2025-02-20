@@ -29,7 +29,7 @@ export class Histogram extends BaseVisualization {
 
   createHistogramElements() {
     if (!this.g) {
-        this.createSvg();  // Ensure this.g is defined from base
+      this.createSvg(); // Ensure this.g is defined from base
     }
     // Create tooltip
     this.tooltip = d3
@@ -345,81 +345,86 @@ export class Histogram extends BaseVisualization {
 
     // If we have highlighted data, draw the original data in grey first
     if (this.highlightedData) {
-        // Clear ALL existing elements first
-        this.g.selectAll(".brush, .bar").remove();
+      // Clear ALL existing elements first
+      this.g.selectAll(".brush, .bar").remove();
 
-        // Create bins for highlighted data first
-        const highlightedBins = this.createBinsFromData(this.highlightedData);
+      // Create bins for highlighted data first
+      const highlightedBins = this.createBinsFromData(this.highlightedData);
 
-        // Draw base/grey bars
-        const baseBars = this.g.selectAll(".base-bar")
-            .data(bins)
-            .enter()
-            .append("rect")
-            .attr("class", "bar base-bar")
-            .attr("x", (b) => xScale(b.x0))
-            .attr("y", (b) => yScale(Number(b.length || 0))) // Handle empty bins
-            .attr("width", (b) => this.getBarWidth(b))
-            .attr("height", (b) => {
-                const h = height - yScale(Number(b.length || 0));
-                return isNaN(h) ? 0 : h; // Return 0 height if NaN
-            })
-            .attr("fill", "#cccccc")
-            .attr("opacity", this.baseOpacity)
-            .attr("stroke", "white")
-            .attr("stroke-width", "1");
+      // Draw base/grey bars
+      const baseBars = this.g
+        .selectAll(".base-bar")
+        .data(bins)
+        .enter()
+        .append("rect")
+        .attr("class", "bar base-bar")
+        .attr("x", (b) => xScale(b.x0))
+        .attr("y", (b) => yScale(Number(b.length || 0))) // Handle empty bins
+        .attr("width", (b) => this.getBarWidth(b))
+        .attr("height", (b) => {
+          const h = height - yScale(Number(b.length || 0));
+          return isNaN(h) ? 0 : h; // Return 0 height if NaN
+        })
+        .attr("fill", "#cccccc")
+        .attr("opacity", this.baseOpacity)
+        .attr("stroke", "white")
+        .attr("stroke-width", "1");
 
-        // Draw highlighted bars with selection-aware coloring
-        const highlightBars = this.g.selectAll(".highlight-bar")
-            .data(highlightedBins)
-            .enter()
-            .append("rect")
-            .attr("class", "bar highlight-bar")
-            .attr("x", (b) => xScale(b.x0))
-            .attr("y", (b) => yScale(Number(b.length || 0))) // Handle empty bins
-            .attr("width", (b) => this.getBarWidth(b))
-            .attr("height", (b) => {
-                const h = height - yScale(Number(b.length || 0));
-                return isNaN(h) ? 0 : h; // Return 0 height if NaN
-            })
-            .attr("fill", (b) => {
-                // Check if bin is selected
-                const originalBin = this.bins.find(ob => 
-                    ob.x0 === b.x0 && ob.x1 === b.x1
-                );
-                return this.selectedBins.has(originalBin) 
-                    ? this.config.colors[1] 
-                    : this.config.colors[0];
-            })
-            .attr("stroke", "white")
-            .attr("stroke-width", "1")
-            .on("mouseover", (event, d) => this.handleMouseOver(event, d))
-            .on("mouseout", (event, d) => this.handleMouseOut(event, d))
-            .on("click", (event, d) => this.handleClick(event, d));
+      // Draw highlighted bars with selection-aware coloring
+      const highlightBars = this.g
+        .selectAll(".highlight-bar")
+        .data(highlightedBins)
+        .enter()
+        .append("rect")
+        .attr("class", "bar highlight-bar")
+        .attr("x", (b) => xScale(b.x0))
+        .attr("y", (b) => yScale(Number(b.length || 0))) // Handle empty bins
+        .attr("width", (b) => this.getBarWidth(b))
+        .attr("height", (b) => {
+          const h = height - yScale(Number(b.length || 0));
+          return isNaN(h) ? 0 : h; // Return 0 height if NaN
+        })
+        .attr("fill", (b) => {
+          // Check if bin is selected
+          const originalBin = this.bins.find(
+            (ob) => ob.x0 === b.x0 && ob.x1 === b.x1
+          );
+          return this.selectedBins.has(originalBin)
+            ? this.config.colors[1]
+            : this.config.colors[0];
+        })
+        .attr("stroke", "white")
+        .attr("stroke-width", "1")
+        .on("mouseover", (event, d) => this.handleMouseOver(event, d))
+        .on("mouseout", (event, d) => this.handleMouseOut(event, d))
+        .on("click", (event, d) => this.handleClick(event, d));
 
-        // Re-add brush last, ensuring proper cleanup
-        if (this.config.selectionMode === "drag") {
-            this.setupBrush();
-        }
+      // Re-add brush last, ensuring proper cleanup
+      if (this.config.selectionMode === "drag") {
+        this.setupBrush();
+      }
     } else {
-        // Original drawing code for normal state
-        const bars = this.g.selectAll(".bar")
-            .data(bins)
-            .enter()
-            .append("rect")
-            .attr("class", "bar")
-            .attr("x", (b) => xScale(b.x0))
-            .attr("y", (b) => yScale(Number(b.length)))
-            .attr("width", (b) => this.getBarWidth(b))
-            .attr("height", (b) => height - yScale(Number(b.length)))
-            .attr("fill", (b) => 
-                this.selectedBins.has(b) ? this.config.colors[1] : this.config.colors[0]
-            )
-            .attr("stroke", "white")
-            .attr("stroke-width", "1")
-            .on("mouseover", (event, d) => this.handleMouseOver(event, d))
-            .on("mouseout", (event, d) => this.handleMouseOut(event, d))
-            .on("click", (event, d) => this.handleClick(event, d));
+      // Original drawing code for normal state
+      const bars = this.g
+        .selectAll(".bar")
+        .data(bins)
+        .enter()
+        .append("rect")
+        .attr("class", "bar")
+        .attr("x", (b) => xScale(b.x0))
+        .attr("y", (b) => yScale(Number(b.length)))
+        .attr("width", (b) => this.getBarWidth(b))
+        .attr("height", (b) => height - yScale(Number(b.length)))
+        .attr("fill", (b) =>
+          this.selectedBins.has(b)
+            ? this.config.colors[1]
+            : this.config.colors[0]
+        )
+        .attr("stroke", "white")
+        .attr("stroke-width", "1")
+        .on("mouseover", (event, d) => this.handleMouseOver(event, d))
+        .on("mouseout", (event, d) => this.handleMouseOut(event, d))
+        .on("click", (event, d) => this.handleClick(event, d));
     }
   }
 
@@ -541,49 +546,51 @@ export class Histogram extends BaseVisualization {
 
     // Get selected data and dispatch when ready
     this.getSelectedData().then((selectedData) => {
+      // Store the selected data for highlighting
+      this.highlightedData = selectedData.map((row) => row[this.config.column]);
+      this.drawBars();
       this.dispatch.call("selectionChanged", this, selectedData);
     });
-
-    this.drawBars();
   }
 
   handleBrush(event) {
     // Clear existing selection if brush is removed
     if (!event.selection) {
-        this.clearSelection();
-        return;
+      this.clearSelection();
+      return;
     }
 
     const [x0, x1] = event.selection;
     const selected = this.bins.filter((b) => {
-        const binLeft = this.xScale(b.x0);
-        const binRight = this.xScale(b.x1);
-        return binLeft <= x1 && binRight >= x0;
+      const binLeft = this.xScale(b.x0);
+      const binRight = this.xScale(b.x1);
+      return binLeft <= x1 && binRight >= x0;
     });
 
     this.selectedBins = new Set(selected);
-    
-    // Redraw bars to update colors
-    this.drawBars();
 
     // Get selected data and dispatch when ready
     this.getSelectedData().then((selectedData) => {
-        this.dispatch.call("selectionChanged", this, selectedData);
+      // Store the selected data for highlighting
+      this.highlightedData = selectedData.map((row) => row[this.config.column]);
+      this.drawBars();
+      this.dispatch.call("selectionChanged", this, selectedData);
     });
-}
+  }
 
   clearSelection() {
     this.selectedBins.clear();
-    
+    this.highlightedData = null;
+
     // Remove brush selection AND brush element
     if (this.config.selectionMode === "drag") {
-        this.g.selectAll(".brush").remove();
-        this.setupBrush(); // Re-create brush with no selection
+      this.g.selectAll(".brush").remove();
+      this.setupBrush(); // Re-create brush with no selection
     }
-    
+
     this.drawBars();
     this.dispatch.call("selectionChanged", this, []);
-}
+  }
 
   reset() {
     this.selectedBins.clear();
@@ -639,142 +646,149 @@ export class Histogram extends BaseVisualization {
 
   async highlightData(indices) {
     if (!indices || indices.length === 0) {
-        this.highlightedData = null;
-        this.drawBars();
-        return;
+      this.highlightedData = null;
+      this.drawBars();
+      return;
     }
 
     try {
-        // Query DuckDB to get highlighted data
-        const query = `
+      // Query DuckDB to get highlighted data
+      const query = `
             SELECT "${this.config.column}" as value
             FROM ${this.tableName}
-            WHERE rowid IN (${indices.join(',')})
+            WHERE rowid IN (${indices.join(",")})
         `;
-        
-        const highlightedResult = await this.dataProcessor.query(query);
-        console.log("Highlighted query result:", highlightedResult); // Debug log
-        
-        // Extract values directly from the result array
-        this.highlightedData = highlightedResult.map(row => {
-            // Handle different data types appropriately
-            const value = row.value;
-            if (this.type === "date" && typeof value === "string") {
-                return new Date(value);
-            }
-            return value;
-        });
-        
-        console.log("Processed highlighted data:", this.highlightedData); // Debug log
-        this.drawBars();
+
+      const highlightedResult = await this.dataProcessor.query(query);
+      console.log("Highlighted query result:", highlightedResult); // Debug log
+
+      // Extract values directly from the result array
+      this.highlightedData = highlightedResult.map((row) => {
+        // Handle different data types appropriately
+        const value = row.value;
+        if (this.type === "date" && typeof value === "string") {
+          return new Date(value);
+        }
+        return value;
+      });
+
+      console.log("Processed highlighted data:", this.highlightedData); // Debug log
+      this.drawBars();
     } catch (error) {
-        console.error('Error highlighting data:', error);
-        this.highlightedData = null;
-        this.drawBars();
+      console.error("Error highlighting data:", error);
+      this.highlightedData = null;
+      this.drawBars();
     }
-}
+  }
 
   createBinsFromData(data) {
     if (this.type === "ordinal") {
-        // For ordinal data, use the same categories as the original bins
-        const binsMap = new Map(this.bins.map(b => [b.key, { 
+      // For ordinal data, use the same categories as the original bins
+      const binsMap = new Map(
+        this.bins.map((b) => [
+          b.key,
+          {
             key: b.key,
             x0: b.key,
             x1: b.key,
-            length: 0 
-        }]));
-        
-        // Count occurrences in highlighted data
-        data.forEach(value => {
-            if (binsMap.has(value)) {
-                binsMap.get(value).length++;
-            }
-        });
-        
-        return Array.from(binsMap.values());
+            length: 0,
+          },
+        ])
+      );
+
+      // Count occurrences in highlighted data
+      data.forEach((value) => {
+        if (binsMap.has(value)) {
+          binsMap.get(value).length++;
+        }
+      });
+
+      return Array.from(binsMap.values());
     } else {
-        // For continuous/date data, use the same bin boundaries as original bins
-        const binGenerator = d3.bin()
-            .domain(this.xScale.domain())
-            // Use the same bin boundaries as the original bins
-            .thresholds(this.bins.map(b => b.x0).slice(1));
-        
-        const newBins = binGenerator(data);
-        
-        // Ensure bins align with original bins and handle empty bins
-        return this.bins.map((originalBin, i) => {
-            const matchingBin = newBins.find(b => 
-                b.x0 >= originalBin.x0 && b.x1 <= originalBin.x1
-            ) || [];
-            
-            return {
-                x0: originalBin.x0,
-                x1: originalBin.x1,
-                length: matchingBin.length || 0,  // Use 0 for empty bins
-                // Copy array methods from the bin
-                forEach: Array.prototype.forEach,
-                map: Array.prototype.map
-            };
-        });
+      // For continuous/date data, use the same bin boundaries as original bins
+      const binGenerator = d3
+        .bin()
+        .domain(this.xScale.domain())
+        // Use the same bin boundaries as the original bins
+        .thresholds(this.bins.map((b) => b.x0).slice(1));
+
+      const newBins = binGenerator(data);
+
+      // Ensure bins align with original bins and handle empty bins
+      return this.bins.map((originalBin, i) => {
+        const matchingBin =
+          newBins.find(
+            (b) => b.x0 >= originalBin.x0 && b.x1 <= originalBin.x1
+          ) || [];
+
+        return {
+          x0: originalBin.x0,
+          x1: originalBin.x1,
+          length: matchingBin.length || 0, // Use 0 for empty bins
+          // Copy array methods from the bin
+          forEach: Array.prototype.forEach,
+          map: Array.prototype.map,
+        };
+      });
     }
   }
 
   // Add this new method
   async highlightDataByValue(values) {
     if (!values || values.length === 0) {
-        this.highlightedData = null;
-        this.drawBars();
-        return;
+      this.highlightedData = null;
+      this.drawBars();
+      return;
     }
 
     try {
-        // Format values based on data type
-        const formattedValues = values.map(v => {
-            if (this.type === 'date' && v instanceof Date) {
-                return `'${v.toISOString()}'`;
-            }
-            if (typeof v === 'string') {
-                return `'${v}'`;
-            }
-            return v;
-        });
+      // Format values based on data type
+      const formattedValues = values.map((v) => {
+        if (this.type === "date" && v instanceof Date) {
+          return `'${v.toISOString()}'`;
+        }
+        if (typeof v === "string") {
+          return `'${v}'`;
+        }
+        return v;
+      });
 
-        // Query DuckDB to get highlighted data
-        const query = `
+      // Query DuckDB to get highlighted data
+      const query = `
             SELECT "${this.config.column}" as value
             FROM ${this.tableName}
-            WHERE "${this.config.column}" IN (${formattedValues.join(',')})
+            WHERE "${this.config.column}" IN (${formattedValues.join(",")})
         `;
-        
-        const highlightedResult = await this.dataProcessor.query(query);
-        
-        // Extract values directly from the result array
-        this.highlightedData = highlightedResult.map(row => {
-            const value = row.value;
-            if (this.type === "date" && typeof value === "string") {
-                return new Date(value);
-            }
-            return value;
-        });
-        
-        this.drawBars();
+
+      const highlightedResult = await this.dataProcessor.query(query);
+
+      // Extract values directly from the result array
+      this.highlightedData = highlightedResult.map((row) => {
+        const value = row.value;
+        if (this.type === "date" && typeof value === "string") {
+          return new Date(value);
+        }
+        return value;
+      });
+
+      this.drawBars();
     } catch (error) {
-        console.error('Error highlighting data:', error);
-        this.highlightedData = null;
-        this.drawBars();
+      console.error("Error highlighting data:", error);
+      this.highlightedData = null;
+      this.drawBars();
     }
-}
+  }
 
   setupBrush() {
     // Remove any existing brush first
     this.g.selectAll(".brush").remove();
-    
+
     // Add brush to a new top-level group
     const brushGroup = this.g
-        .append("g")
-        .attr("class", "brush")
-        .style("pointer-events", "all");
-    
+      .append("g")
+      .attr("class", "brush")
+      .style("pointer-events", "all");
+
     brushGroup.call(this.brush);
-}
+  }
 }

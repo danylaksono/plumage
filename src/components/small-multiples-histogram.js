@@ -90,15 +90,25 @@ export class SmallMultiplesHistogram extends BaseVisualization {
   }
 
   setupLinkedInteractivity() {
-    const self = this; // Store 'this' for use in the callback
+    const self = this;
 
     this.histograms.forEach((histogram) => {
       histogram.on("selectionChanged", async (selectedData) => {
-        // console.log(`selectionChanged`, selectedData, this, self);
-        self.selectedData = selectedData; // Update shared selected data
-        self.updateOtherHistograms(histogram); // Update other histograms
+        self.selectedData = selectedData;
 
-        // console.log("Shared selected data:", self.selectedData);
+        // Update highlighting in other histograms
+        for (const otherHistogram of self.histograms) {
+          if (otherHistogram !== histogram) {
+            // Get the column values from selected data for the current histogram
+            const selectedValues = selectedData.map(
+              (row) => row[otherHistogram.config.column]
+            );
+            await otherHistogram.highlightDataByValue(selectedValues);
+          }
+        }
+
+        // Dispatch selection event from SmallMultiples for external listeners
+        self.dispatch.call("selectionChanged", self, selectedData);
       });
     });
   }
