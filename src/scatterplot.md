@@ -1,7 +1,7 @@
 # Scatterplot
 
 ```js
-import { ScatterPlot } from "./components/scatterplot.js";
+import { ScatterPlot } from "./components/charts/scatterplot.js";
 ```
 
 ```js

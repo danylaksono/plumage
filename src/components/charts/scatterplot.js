@@ -1,4 +1,4 @@
-import { BaseVisualization } from "./base.js";
+import { BaseVisualization } from "../_base/base.js";
 import * as d3 from "npm:d3";
 
 export class ScatterPlot extends BaseVisualization {

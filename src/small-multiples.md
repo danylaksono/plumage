@@ -1,7 +1,7 @@
 # SmallMultiplesHistogram
 
 ```js
-import { SmallMultiplesHistogram } from "./components/small-multiples-histogram.js";
+import { SmallMultiplesHistogram } from "./components/charts/small-multiples-histogram.js";
 ```
 
 ```js

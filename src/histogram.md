@@ -1,7 +1,7 @@
 # Histogram
 
 ```js
-import { Histogram } from "./components/histogram.js";
+import { Histogram } from "./components/charts/histogram.js";
 ```
 
 ```js

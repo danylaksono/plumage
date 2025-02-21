@@ -1,6 +1,6 @@
 import * as d3 from "npm:d3";
 import _ from "npm:lodash"; // Ensure this is imported.
-import { BaseVisualization } from "./base.js";
+import { BaseVisualization } from "../_base/base.js";
 import { Histogram } from "./histogram.js";
 
 export class SmallMultiplesHistogram extends BaseVisualization {
@@ -12,6 +12,7 @@ export class SmallMultiplesHistogram extends BaseVisualization {
       margin: { top: 40, right: 10, bottom: 30, left: 30 }, // Increased top margin for title
       showTitle: true, // Option to show/hide titles
       showAxis: false, // Option to show/hide axes
+      gap: { horizontal: 10, vertical: 10 }, //  gaps between charts
     };
 
     super({ ...smallMultiplesDefaults, ...config });
@@ -33,7 +34,8 @@ export class SmallMultiplesHistogram extends BaseVisualization {
   }
 
   async createHistograms() {
-    const { columns, histogramWidth, histogramHeight, showTitle } = this.config;
+    const { columns, histogramWidth, histogramHeight, showTitle, gap } =
+      this.config;
 
     if (!columns || columns.length === 0) {
       console.warn("No columns specified for SmallMultiplesHistogram.");
@@ -42,7 +44,8 @@ export class SmallMultiplesHistogram extends BaseVisualization {
 
     // Determine the layout of the histograms (rows and columns)
     const containerWidth = this.config.width;
-    const histogramsPerRow = Math.floor(containerWidth / histogramWidth);
+    const effectiveWidth = histogramWidth + gap.horizontal; // Include horizontal gap in width calculation
+    const histogramsPerRow = Math.floor(containerWidth / effectiveWidth);
     const numRows = Math.ceil(columns.length / histogramsPerRow);
 
     this.histograms = [];
@@ -53,8 +56,8 @@ export class SmallMultiplesHistogram extends BaseVisualization {
       const row = Math.floor(i / histogramsPerRow);
       const col = i % histogramsPerRow;
 
-      const xOffset = col * histogramWidth;
-      const yOffset = row * histogramHeight;
+      const xOffset = col * (histogramWidth + gap.horizontal);
+      const yOffset = row * (histogramHeight + gap.vertical);
 
       const histogramConfig = {
         column: column,
