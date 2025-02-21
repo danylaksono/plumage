@@ -39,10 +39,27 @@ export class HistogramController {
 
   async initialize(data, options) {
     try {
-      await this.createBins(data, options);
-      this.render();
+      console.log('Initializing histogram:', {
+        columnName: this.columnName,
+        dataLength: data?.length,
+        type: options?.type,
+        hasBins: Boolean(options?.bins)
+      });
+
+      await this.createBins(data, {
+        type: options?.type || 'ordinal',
+        thresholds: options?.thresholds,
+        preBinnedData: options?.bins  // Use pre-binned data if available
+      });
+      
+      // Ensure we have valid data before rendering
+      if (this.originalData.bins && this.originalData.bins.length > 0) {
+        this.render();
+      } else {
+        this.showError('No data to display');
+      }
     } catch (error) {
-      console.error("Failed to initialize histogram:", error);
+      console.error('Failed to initialize histogram:', error);
       this.showError();
     }
   }
@@ -52,32 +69,46 @@ export class HistogramController {
       return;
     }
 
-    const values = data.filter((d) => d != null);
-
+    const values = data.filter(d => d != null);
+    
     if (options.type === "continuous") {
-      const binGenerator = d3
-        .bin()
-        .domain(d3.extent(values))
+      const extent = d3.extent(values);
+      const binGenerator = d3.bin()
+        .domain(extent)
         .thresholds(options.thresholds || d3.thresholdSturges);
-
-      this.originalData.bins = binGenerator(values).map((bin) => ({
+      
+      const bins = binGenerator(values);
+      this.originalData.bins = bins.map(bin => ({
         x0: bin.x0,
         x1: bin.x1,
         length: bin.length,
-        values: bin,
+        values: Array.from(bin),  // Store original values
+        key: bin.x0  // Store x0 as key for consistent reference
       }));
-
+      
       this.originalData.type = "continuous";
     } else {
-      const counts = d3.rollup(
-        values,
-        (v) => v.length,
-        (d) => d
-      );
-      this.originalData.bins = Array.from(counts, ([key, count]) => ({
-        key,
-        length: count,
-        values: values.filter((v) => v === key),
+      // For ordinal data, preserve exact values
+      const uniqueValues = new Map();
+      values.forEach(value => {
+        const key = String(value);
+        if (!uniqueValues.has(key)) {
+          uniqueValues.set(key, {
+            originalValue: value,
+            count: 0,
+            values: []
+          });
+        }
+        const entry = uniqueValues.get(key);
+        entry.count++;
+        entry.values.push(value);
+      });
+
+      this.originalData.bins = Array.from(uniqueValues.values()).map(entry => ({
+        key: entry.originalValue,  // Use original value directly as key
+        length: entry.count,
+        values: entry.values,
+        value: entry.originalValue  // Keep original value for reference
       }));
 
       this.originalData.type = "ordinal";
@@ -89,78 +120,42 @@ export class HistogramController {
 
   render() {
     this.container.innerHTML = "";
-
-    const svg = d3
-      .select(this.container)
+    
+    const svg = d3.select(this.container)
       .append("svg")
       .attr("width", this.options.width)
       .attr("height", this.options.height);
 
     const { width, height } = this.getChartDimensions();
-    const g = svg
-      .append("g")
-      .attr(
-        "transform",
-        `translate(${this.options.margin.left},${this.options.margin.top})`
-      );
+    const g = svg.append("g")
+      .attr("transform", `translate(${this.options.margin.left},${this.options.margin.top})`);
 
     // Create scales
     const x = this.createXScale(width);
     const y = this.createYScale(height);
 
-    // If there's a selection in another column and we have highlighted data
-    if (this.highlightedData) {
-      // Draw original data as background in grey
-      this.drawHistogramBars(
-        g,
-        this.originalData.bins,
-        x,
-        y,
-        "#cccccc",
-        this.baseOpacity
-      );
+    // Draw background histogram
+    this.drawHistogramBars(g, this.originalData.bins, x, y, "#e0e0e0", this.baseOpacity);
 
-      // Draw highlighted data in blue
-      const highlightedBins = this.createBinsFromData(this.highlightedData);
-      this.drawHistogramBars(
-        g,
-        highlightedBins,
-        x,
-        y,
-        this.options.colors[0],
-        1
-      );
-    } else if (this.selected.size > 0) {
-      // Draw original data as background in grey
-      this.drawHistogramBars(
-        g,
-        this.originalData.bins,
-        x,
-        y,
-        "#cccccc",
-        this.baseOpacity
-      );
-
-      // Draw selected bins in blue
-      const selectedBins = this.originalData.bins.filter((bin) =>
-        this.originalData.type === "continuous"
-          ? this.selected.has(bin.x0)
-          : this.selected.has(bin.key)
-      );
+    // Draw highlighted bars if we have a selection
+    if (this.selected.size > 0) {
+      let selectedBins;
+      if (this.originalData.type === "continuous") {
+        const selectedRange = Array.from(this.selected)[0];
+        selectedBins = this.originalData.bins.filter(bin => 
+          bin.x0 >= selectedRange.min && bin.x1 <= selectedRange.max
+        );
+      } else {
+        selectedBins = this.originalData.bins.filter(bin => 
+          this.selected.has(bin.key)
+        );
+      }
+      
+      // Draw selected bins in primary color
       this.drawHistogramBars(g, selectedBins, x, y, this.options.colors[0], 1);
-    } else {
-      // No selection, draw all bars in blue
-      this.drawHistogramBars(
-        g,
-        this.originalData.bins,
-        x,
-        y,
-        this.options.colors[0],
-        1
-      );
     }
 
-    // Add brush for continuous data or click handlers for ordinal
+    // Add interaction handlers last
     if (this.originalData.type === "continuous") {
       this.setupBrush(svg, width, height);
     } else {
@@ -183,17 +178,17 @@ export class HistogramController {
 
   createXScale(width) {
     if (this.originalData.type === "continuous") {
-      return d3
-        .scaleLinear()
-        .domain([
-          d3.min(this.originalData.bins, (d) => d.x0),
-          d3.max(this.originalData.bins, (d) => d.x1),
-        ])
-        .range([0, width]);
+      const extent = [
+        d3.min(this.originalData.bins, d => d.x0),
+        d3.max(this.originalData.bins, d => d.x1)
+      ];
+      return d3.scaleLinear()
+        .domain(extent)
+        .range([0, width])
+        .nice();  // Nice the scale for better brush interaction
     } else {
-      return d3
-        .scaleBand()
-        .domain(this.originalData.bins.map((d) => d.key))
+      return d3.scaleBand()
+        .domain(this.originalData.bins.map(d => d.key))
         .range([0, width])
         .padding(0.1);
     }
@@ -212,11 +207,18 @@ export class HistogramController {
         .data(bins)
         .join("rect")
         .attr("class", `bar-${color}`)
-        .attr("x", (d) => x(d.x0))
-        .attr("width", (d) => Math.max(0, x(d.x1) - x(d.x0) - 1))
-        .attr("y", (d) => y(d.length))
-        .attr("height", (d) => height - y(d.length))
-        .attr("fill", color)
+        .attr("x", d => x(d.x0))
+        .attr("width", d => Math.max(0, x(d.x1) - x(d.x0) - 1))
+        .attr("y", d => y(d.length))
+        .attr("height", d => height - y(d.length))
+        .attr("fill", d => {
+          if (this.selected.size > 0) {
+            const selectedRange = Array.from(this.selected)[0];
+            return selectedRange && d.x0 >= selectedRange.min && d.x1 <= selectedRange.max ? 
+              this.options.colors[0] : color;
+          }
+          return color;
+        })
         .attr("opacity", opacity)
         .attr("rx", 2);
     } else {
@@ -224,53 +226,127 @@ export class HistogramController {
         .data(bins)
         .join("rect")
         .attr("class", `bar-${color}`)
-        .attr("x", (d) => x(d.key))
+        .attr("x", d => x(d.key))
         .attr("width", x.bandwidth())
-        .attr("y", (d) => y(d.length))
-        .attr("height", (d) => height - y(d.length))
-        .attr("fill", (d) =>
-          this.selected.has(d.key) ? this.options.colors[0] : color
-        )
+        .attr("y", d => y(d.length))
+        .attr("height", d => height - y(d.length))
+        .attr("fill", d => this.selected.has(d.key) ? this.options.colors[0] : color)
         .attr("opacity", opacity)
         .attr("rx", 2);
     }
   }
 
   setupBrush(svg, width, height) {
-    const brush = d3
-      .brushX()
-      .extent([
-        [0, 0],
-        [width, height],
-      ])
-      .on("end", (event) => this.handleBrush(event));
+    // Clear any existing brush
+    svg.selectAll(".brush").remove();
+    
+    const brush = d3.brushX()
+      .extent([[0, 0], [width, height]])
+      .on("end", (event) => {
+        if (!event.selection) {
+          this.resetSelection();
+          return;
+        }
 
-    svg
-      .append("g")
+        // Transform coordinates back to data space
+        const scale = this.createXScale(width);
+        const [x0, x1] = event.selection.map(x => scale.invert(x));
+
+        console.log('Brush selection:', {
+          domain: [x0, x1],
+          columnName: this.columnName
+        });
+
+        // Store selected range for visualization
+        this.selected = new Set([{min: x0, max: x1}]);
+
+        // Get all values from bins that overlap with the brush range
+        const selectedValues = new Set();
+        this.originalData.bins.forEach(bin => {
+          // Check if bin overlaps with brush selection
+          if (bin.x0 <= x1 && bin.x1 >= x0) {
+            // Only include values that actually fall within the brush range
+            if (Array.isArray(bin.values)) {
+              bin.values.forEach(v => {
+                // Convert to number and check if in range
+                const numValue = Number(v);
+                if (!isNaN(numValue) && numValue >= x0 && numValue <= x1) {
+                  selectedValues.add(numValue);
+                }
+              });
+            }
+          }
+        });
+
+        console.log('Selected values:', {
+          count: selectedValues.size,
+          sampleValues: Array.from(selectedValues).slice(0, 5)
+        });
+
+        // Update visualization
+        this.render();
+
+        // Notify table with actual numeric values
+        if (this.table && selectedValues.size > 0) {
+          this.table.handleHistogramSelection(selectedValues, this.columnName);
+        }
+      });
+
+    // Add brush
+    const brushG = svg.append("g")
       .attr("class", "brush")
-      .attr(
-        "transform",
-        `translate(${this.options.margin.left},${this.options.margin.top})`
-      )
-      .call(brush);
+      .attr("transform", `translate(${this.options.margin.left},${this.options.margin.top})`);
+
+    // Initialize brush
+    brushG.call(brush);
+
+    // Add brush overlay to capture mouse events
+    brushG.selectAll(".overlay")
+      .style("pointer-events", "all")
+      .style("cursor", "crosshair");
   }
 
-  setupOrdinalInteraction(svg, x, y) {
-    const { height } = this.getChartDimensions();
-
-    svg
-      .selectAll(".bar-overlay")
+  setupOrdinalInteraction(g, x, y) {
+    g.selectAll(".bar-overlay")
       .data(this.originalData.bins)
       .join("rect")
       .attr("class", "bar-overlay")
-      .attr("x", (d) => x(d.key))
+      .attr("x", d => x(d.key))
       .attr("width", x.bandwidth())
       .attr("y", 0)
-      .attr("height", height)
+      .attr("height", this.getChartDimensions().height)
       .attr("fill", "transparent")
-      .on("click", (event, d) => this.handleBarClick(d))
-      .on("mouseover", (event, d) => this.showTooltip(d))
-      .on("mouseout", () => this.hideTooltip());
+      .attr("cursor", "pointer")
+      .on("click", (event, d) => {
+        event.stopPropagation();
+
+        // Use the exact value from the bin
+        const selectedValue = d.key;
+        
+        // Update visualization state
+        const newSelected = new Set(this.selected);
+        if (event.ctrlKey || event.metaKey) {
+          if (newSelected.has(selectedValue)) {
+            newSelected.delete(selectedValue);
+          } else {
+            newSelected.add(selectedValue);
+          }
+        } else {
+          newSelected.clear();
+          newSelected.add(selectedValue);
+        }
+        
+        this.selected = newSelected;
+
+        // Update visualization first
+        this.render();
+
+        // Then notify table with exact value
+        if (this.table && this.table.handleHistogramSelection) {
+          const selectedValues = new Set([selectedValue]);
+          this.table.handleHistogramSelection(selectedValues, this.columnName);
+        }
+      });
   }
 
   handleBrush(event) {
@@ -303,44 +379,42 @@ export class HistogramController {
     this.updateSelection(newSelected);
   }
 
-  updateSelection(selected) {
-    this.selected = selected;
-
-    // Get the data for the selected bins
-    const selectedData = Array.from(selected).flatMap(
-      (key) =>
-        this.originalData.bins.find((b) =>
-          this.originalData.type === "continuous" ? b.x0 === key : b.key === key
-        )?.values || []
-    );
-
-    // Update highlighted data
-    this.highlightedData = selectedData;
-
-    // Update current data bins based on selection
-    if (this.originalData.type === "continuous") {
-      this.currentData.bins = this.createBinsFromData(selectedData);
-    } else {
-      this.currentData.bins = this.originalData.bins.map((bin) => ({
-        ...bin,
-        length: selected.has(bin.key) ? bin.length : 0,
-      }));
+  updateSelection(selectedValues, shouldNotifyTable = false) {
+    // Clear existing selection if needed
+    if (!this.ctrlDown) {
+      this.selected.clear();
     }
 
+    if (this.originalData.type === "continuous") {
+      // For continuous data, find bins that contain the selected values
+      this.originalData.bins.forEach(bin => {
+        if (bin.values.some(v => selectedValues.has(v))) {
+          this.selected.add(bin.x0);
+        }
+      });
+    } else {
+      // For ordinal data, find bins that match the selected values
+      this.originalData.bins.forEach(bin => {
+        if (bin.values.some(v => selectedValues.has(v))) {
+          this.selected.add(bin.key);
+        }
+      });
+    }
+
+    // Update visual state
     this.render();
 
-    // Notify table of selection if available
-    if (this.table) {
-      this.table.updateSelection(selected);
+    // Notify table if requested
+    if (shouldNotifyTable && this.table) {
+      this.table.updateSelection(selectedValues, this.columnName);
     }
   }
 
   resetSelection() {
     this.selected.clear();
     this.highlightedData = null;
-    this.currentData = structuredClone(this.originalData);
     this.render();
-
+    
     if (this.table) {
       this.table.clearSelection();
     }

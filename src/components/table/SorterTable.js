@@ -6,7 +6,7 @@ import { ColShiftController } from "./ColShiftController.js";
 import { HistogramController } from "./HistogramController.js";
 import { BinningService } from "./BinningService.js";
 import { FilterService } from "./FilterService.js"; // Import FilterService
-import { DuckDBDataProcessor } from "../_base/duckdb-processor.js";
+import { DuckDBDataProcessor } from "../_base/duckdb-processor.js"; // Add this import
 
 export class SorterTable {
   constructor(data, columnNames, changed, options = {}) {
@@ -176,13 +176,6 @@ export class SorterTable {
           return null;
         }
 
-        // Get binned data from DuckDB
-        const binData = await this.duckDBProcessor.binDataWithDuckDB(
-          col.column,
-          col.type,
-          this.options.maxOrdinalBins || 20
-        );
-
         // Create visualization controller with proper options
         const controller = new HistogramController([], {
           type: col.type,
@@ -190,8 +183,16 @@ export class SorterTable {
           maxOrdinalBins: this.options.maxOrdinalBins,
         });
 
-        // Link controller to table
+        // Link controller to table and set column name
         controller.table = this;
+        controller.columnName = col.column;
+
+        // Get binned data from DuckDB
+        const binData = await this.duckDBProcessor.binDataWithDuckDB(
+          col.column,
+          col.type,
+          this.options.maxOrdinalBins || 20
+        );
 
         // Set initial data with binning info
         const visData = await this.getVisualizationData(col.column, binData);
@@ -466,110 +467,108 @@ export class SorterTable {
   }
 
   getSelection() {
-    let ret = [];
-    this.selectedRows.forEach((index) => {
-      if (index >= 0 && index < this.dataInd.length) {
-        ret.push({
-          index: index,
-          data: this.data[this.dataInd[index]],
-        });
-      }
+    const selection = Array.from(this.selectedRows)
+      .filter((index) => index >= 0 && index < this.data.length)
+      .map((index) => ({
+        index,
+        data: this.data[index],
+      }));
+
+    // Log selection state for debugging
+    console.log("Getting selection:", {
+      selectedRows: Array.from(this.selectedRows),
+      validSelection: selection.length,
+      totalRows: this.data.length,
     });
-    // console.log("Selection result:", ret);
-    this.selected = ret;
-    return ret;
+
+    this.selected = selection;
+    return selection;
   }
 
   getSelectionRule() {
-    let sel = this.getSelection();
-    let sortKeys = Object.keys(this.compoundSorting);
+    if (this.selectedRows.size === 0) return null;
 
-    if (sortKeys.length === 0) {
-      return null;
-    } else {
-      let col = sortKeys[0];
-      let firstIndex = sel[sel.length - 1].index;
-      let lastIndex = sel[sel.length - 1].index;
+    const rules = [];
+    const selectedValues = new Map();
 
-      if ((firstIndex = 0 && lastIndex == this.dataInd.length - 1)) return [];
-      else {
-        let rule = [];
-        let r = "";
-        if (
-          firstIndex > 0 &&
-          this.data[this.dataInd[firstIndex - 1]][col] !=
-            this.data[this.dataInd[firstIndex]][col]
-        ) {
-          r =
-            col +
-            (this.compoundSorting[col].how === "up"
-              ? " lower than "
-              : " higher than ") +
-            this.data[this.dataInd[firstIndex]][col];
-        }
-        if (
-          lastIndex < this.dataInd.length - 1 &&
-          this.data[this.dataInd[lastIndex + 1]][col] !=
-            this.data[this.dataInd[lastIndex]][col]
-        ) {
-          if (r.length == 0)
-            r =
-              col +
-              (this.compoundSorting[col].how === "up"
-                ? " lower than "
-                : " higher than ") +
-              this.data[this.dataInd[lastIndex]][col];
-          else
-            r =
-              r +
-              (this.compoundSorting[col].how === "up"
-                ? " and lower than"
-                : "  and higher than ") +
-              this.data[this.dataInd[lastIndex]][col];
-        }
-        if (r.length > 0) rule.push(r);
-
-        if (this.compoundSorting[col].how === "up")
-          r =
-            col +
-            " in bottom " +
-            this.percentalize(lastIndex / this.data.length, "top") +
-            " percentile";
-        else
-          r =
-            col +
-            " in top " +
-            this.percentalize(1 - lastIndex / this.data.length, "bottom") +
-            " percentile";
-        rule.push(r);
-
-        return rule;
+    // Group selected values by column
+    this.columnManager.columns.forEach((col) => {
+      const values = new Set();
+      this.selectedRows.forEach((idx) => {
+        const value = this.data[idx][col.column];
+        if (value != null) values.add(value);
+      });
+      if (values.size > 0) {
+        selectedValues.set(col.column, Array.from(values));
       }
-    }
+    });
+
+    // Create rules for each column with selections
+    selectedValues.forEach((values, column) => {
+      const columnDef = this.columnManager.columns.find(
+        (c) => c.column === column
+      );
+      if (columnDef) {
+        if (columnDef.type === "continuous") {
+          const range = d3.extent(values);
+          rules.push(`${column} between ${range[0]} and ${range[1]}`);
+        } else {
+          rules.push(`${column} in (${values.join(", ")})`);
+        }
+      }
+    });
+
+    return rules.length > 0 ? rules : null;
   }
 
   selectionUpdated() {
+    const selection = this.getSelection();
     this.changed({
       type: "selection",
-      indeces: this.dataInd,
-      selection: this.getSelection(),
+      indeces: Array.from(this.selectedRows),
+      selection: selection,
       rule: this.getSelectionRule(),
+    });
+
+    // Also update histogram visuals
+    this.visControllers.forEach((controller) => {
+      if (controller) {
+        // Get the selected data for this controller's column
+        const columnName = controller.columnName;
+        if (columnName) {
+          const selectedData = Array.from(this.selectedRows)
+            .map((idx) => this.data[idx][columnName])
+            .filter((val) => val != null);
+
+          if (selectedData.length > 0) {
+            controller.highlightedData = selectedData;
+          } else {
+            controller.highlightedData = null;
+          }
+          controller.render();
+        }
+      }
     });
   }
 
   clearSelection() {
-    this.selectedRows.clear(); // Clear the Set of selected rows
-    // Also, visually deselect all rows in the table
+    const previousSize = this.selectedRows.size;
+    this.selectedRows.clear();
+
     if (this.tableRenderer.tBody) {
-      this.tableRenderer.tBody.querySelectorAll("tr").forEach((tr) => {
-        this.unselectRow(tr);
+      Array.from(this.tableRenderer.tBody.children).forEach((tr) => {
         tr.selected = false;
         tr.style.fontWeight = "normal";
         tr.style.color = "grey";
       });
     }
-    // if (this.tBody != null)
-    //   this.tBody.querySelectorAll("tr").forEach((tr) => this.unselectRow(tr));
+
+    console.log("Selection cleared:", {
+      previousSize,
+      currentSize: this.selectedRows.size,
+    });
+    // Clear histogram selections
+    this.resetHistogramSelections();
   }
 
   selectColumn(columnName) {
@@ -595,10 +594,23 @@ export class SorterTable {
   }
 
   selectRow(tr) {
-    tr.selected = true;
-    tr.style.fontWeight = "bold";
-    tr.style.color = "black";
-    this.selectedRows.add(this.getRowIndex(tr));
+    if (!tr || tr.selected) return;
+
+    const rowIndex = Array.prototype.indexOf.call(
+      this.tableRenderer.tBody.children,
+      tr
+    );
+    if (rowIndex >= 0) {
+      tr.selected = true;
+      tr.style.fontWeight = "bold";
+      tr.style.color = "black";
+      this.selectedRows.add(rowIndex);
+
+      console.log("Row selected:", {
+        index: rowIndex,
+        totalSelected: this.selectedRows.size,
+      });
+    }
   }
 
   unselectRow(tr) {
@@ -609,11 +621,8 @@ export class SorterTable {
   }
 
   getRowIndex(tr) {
-    let index = -1;
-    this.tableRenderer.tBody.querySelectorAll("tr").forEach((t, i) => {
-      if (t == tr) index = i;
-    });
-    return index;
+    if (!tr || !this.tableRenderer.tBody) return -1;
+    return Array.from(this.tableRenderer.tBody.children).indexOf(tr);
   }
 
   createHeader() {
@@ -622,8 +631,10 @@ export class SorterTable {
       this.tableRenderer.setTable(this.table);
     }
 
-    if (this.tableRenderer.tHead != null) {
-      this.table.removeChild(this.tableRenderer.tHead);
+    // Safely remove existing thead if it exists
+    const existingTHead = this.table.querySelector("thead");
+    if (existingTHead) {
+      existingTHead.remove();
     }
 
     this.sortControllers = [];
@@ -790,8 +801,11 @@ export class SorterTable {
       this.tableRenderer.setTable(this.table);
     }
 
-    if (this.tableRenderer.tBody != null)
-      this.table.removeChild(this.tableRenderer.tBody);
+    // Safely remove existing tbody if it exists
+    const existingTBody = this.table.querySelector("tbody");
+    if (existingTBody) {
+      existingTBody.remove();
+    }
 
     this.tableRenderer.tBody = document.createElement("tbody");
     this.table.appendChild(this.tableRenderer.tBody);
@@ -1226,161 +1240,6 @@ export class SorterTable {
     return container;
   }
 
-  getNode() {
-    // Ensure TableRenderer has the table reference before creating container
-    if (!this.tableRenderer.table) {
-      this.tableRenderer.setTable(this.table);
-    }
-
-    let container = document.createElement("div");
-    Object.assign(container.style, {
-      height: this.options.containerHeight,
-      width: this.options.containerWidth,
-      overflow: "auto",
-      position: "relative",
-      display: "flex",
-      flexDirection: "row",
-    });
-
-    // --- Sidebar ---
-    let sidebar = document.createElement("div");
-    Object.assign(sidebar.style, {
-      display: "flex",
-      flexDirection: "column",
-      alignItems: "center",
-      width: "35px",
-      padding: "5px",
-      borderRight: "1px solid #ccc",
-      marginRight: "2px",
-    });
-
-    // --- Filter Icon ---
-    let filterIcon = document.createElement("i");
-    filterIcon.classList.add("fas", "fa-filter");
-    Object.assign(filterIcon.style, {
-      cursor: "pointer",
-      marginBottom: "15px",
-      color: "gray",
-    });
-    filterIcon.setAttribute("title", "Apply Filter");
-    filterIcon.addEventListener("click", (event) => {
-      event.stopPropagation();
-      this.filter();
-    });
-    sidebar.appendChild(filterIcon);
-
-    // --- Undo Icon ---
-    let undoIcon = document.createElement("i");
-    undoIcon.classList.add("fas", "fa-undo");
-    Object.assign(undoIcon.style, {
-      cursor: "pointer",
-      marginBottom: "15px",
-      color: "gray",
-    });
-    undoIcon.setAttribute("title", "Undo");
-    undoIcon.addEventListener("click", (event) => {
-      event.stopPropagation();
-      this.undo();
-    });
-    sidebar.appendChild(undoIcon);
-
-    // --- Reset Icon ---
-    let resetIcon = document.createElement("i");
-    resetIcon.classList.add("fas", "fa-sync-alt");
-    Object.assign(resetIcon.style, {
-      cursor: "pointer",
-      marginBottom: "15px",
-      color: "gray",
-    });
-    resetIcon.setAttribute("title", "Reset Table");
-    resetIcon.addEventListener("click", (event) => {
-      event.stopPropagation();
-      this.resetTable();
-    });
-    sidebar.appendChild(resetIcon);
-
-    // --- Table Container ---
-    let tableContainer = document.createElement("div");
-    Object.assign(tableContainer.style, {
-      flex: "1",
-      overflowX: "auto",
-    });
-
-    // Set table width
-    if (this.tableWidth) {
-      this.table.style.width = this.tableWidth;
-    } else {
-      this.table.style.width = "100%";
-    }
-
-    // Ensure table is properly initialized in renderer before adding to container
-    const table = this.tableRenderer.getTable() || this.table;
-    tableContainer.appendChild(table);
-
-    // Add components to container
-    container.appendChild(sidebar);
-    container.appendChild(tableContainer);
-
-    // Event listeners for shift and ctrl keys
-    container.addEventListener("keydown", (event) => {
-      if (event.shiftKey) {
-        this.shiftDown = true;
-      }
-      if (event.ctrlKey) {
-        this.ctrlDown = true;
-      }
-      event.preventDefault();
-    });
-
-    container.addEventListener("keyup", (event) => {
-      this.shiftDown = false;
-      this.ctrlDown = false;
-      event.preventDefault();
-    });
-
-    container.setAttribute("tabindex", "0"); // Make the container focusable
-
-    // Lazy loading listener
-    container.addEventListener("scroll", () => {
-      const threshold = 100;
-      const scrollTop = container.scrollTop;
-      const scrollHeight = container.scrollHeight;
-      const clientHeight = container.clientHeight;
-
-      if (scrollTop + clientHeight >= scrollHeight - threshold) {
-        if (!this.addingRows) {
-          this.addTableRows(this.additionalLines);
-        }
-      }
-    });
-
-    //deselection
-    // Add click listener to the container
-    container.addEventListener("click", (event) => {
-      // Check if the click target is outside any table row
-      let isOutsideRow = true;
-      let element = event.target;
-      while (element != null) {
-        if (
-          element == this.tableRenderer.tBody ||
-          element == this.tableRenderer.tHead
-        ) {
-          isOutsideRow = false;
-          break;
-        }
-        element = element.parentNode;
-      }
-
-      if (isOutsideRow) {
-        this.clearSelection();
-        this.resetHistogramSelections();
-        this.selectionUpdated();
-      }
-    });
-
-    return container;
-  }
-
   // Add this helper method for building filter clause
   buildFilterClause() {
     if (this.selectedRows.size === 0) return "1=1";
@@ -1429,37 +1288,140 @@ export class SorterTable {
 
   // Update the updateSelection method to handle histogram interactions
   updateSelection(selectedValues, sourceColumn) {
-    // Clear existing selection if this is a new selection
+    // Use histogram handler for selection
+    if (this.handleHistogramSelection) {
+      this.handleHistogramSelection(selectedValues, sourceColumn);
+      return;
+    }
+
     if (!this.ctrlDown) {
       this.clearSelection();
     }
 
+    const columnDef = this.columnManager.columns.find(
+      (c) => c.column === sourceColumn
+    );
+    if (!columnDef) return;
+
+    // Convert selected values to strings for consistent comparison
+    const selectedLookup = new Set(
+      Array.from(selectedValues).map((v) => String(v))
+    );
+
     // Update table row selection
-    this.tableRenderer.tBody.querySelectorAll("tr").forEach((tr, idx) => {
-      const value = this.data[idx][sourceColumn];
-      if (selectedValues.has(value)) {
-        this.selectRow(tr);
+    let selectedCount = 0;
+    Array.from(this.tableRenderer.tBody.children).forEach((tr, idx) => {
+      const rowValue = this.data[idx][sourceColumn];
+      if (rowValue != null) {
+        const strValue = String(rowValue);
+        if (selectedLookup.has(strValue)) {
+          this.selectRow(tr);
+          selectedCount++;
+        }
       }
     });
 
-    // Update other histograms to reflect the selection
+    // Update other histograms
+    this.updateOtherHistograms(sourceColumn);
+
+    this.selectionUpdated();
+  }
+
+  handleHistogramSelection(selectedValues, sourceColumn) {
+    if (!this.ctrlDown) {
+      this.clearSelection();
+    }
+
+    const columnDef = this.columnManager.columns.find(
+      (c) => c.column === sourceColumn
+    );
+    if (!columnDef) return;
+
+    // Create a lookup of selected values for efficient comparison
+    const selectedLookup = new Set();
+    selectedValues.forEach((value) => {
+      // Store both string and original value to handle different types
+      selectedLookup.add(String(value));
+      selectedLookup.add(value);
+    });
+
+    console.log("Processing selection:", {
+      selectedValues: Array.from(selectedValues),
+      columnName: sourceColumn,
+      columnType: columnDef.type,
+    });
+
+    // Select matching rows
+    let selectedCount = 0;
+    Array.from(this.tableRenderer.tBody.children).forEach((tr, idx) => {
+      const rowValue = this.data[idx][sourceColumn];
+      if (rowValue != null) {
+        // Try both string and original value comparison
+        if (
+          selectedLookup.has(rowValue) ||
+          selectedLookup.has(String(rowValue))
+        ) {
+          this.selectRow(tr);
+          selectedCount++;
+          console.log("Selected row:", {
+            index: idx,
+            value: rowValue,
+            stringValue: String(rowValue),
+          });
+        }
+      }
+    });
+
+    console.log("Selection complete:", {
+      totalSelected: selectedCount,
+      selectedRows: Array.from(this.selectedRows),
+    });
+
+    // Update other histograms
+    this.updateOtherHistograms(sourceColumn);
+
+    this.selectionUpdated();
+  }
+
+  selectRow(tr) {
+    const rowIndex = Array.from(this.tableRenderer.tBody.children).indexOf(tr);
+    if (rowIndex >= 0 && !tr.selected) {
+      tr.selected = true;
+      tr.style.fontWeight = "bold";
+      tr.style.color = "black";
+      this.selectedRows.add(rowIndex);
+    }
+  }
+
+  updateOtherHistograms(sourceColumn) {
     this.visControllers.forEach((controller, idx) => {
       if (
         controller &&
         this.columnManager.columns[idx].column !== sourceColumn
       ) {
         const columnName = this.columnManager.columns[idx].column;
+
         // Get data for the selected rows for this column
-        const selectedData = Array.from(this.selectedRows).map(
-          (rowIdx) => this.data[rowIdx][columnName]
-        );
+        const selectedData = Array.from(this.selectedRows)
+          .map((rowIdx) => this.data[rowIdx][columnName])
+          .filter((val) => val != null);
+
+        console.log("Updating histogram:", {
+          column: columnName,
+          selectedDataCount: selectedData.length,
+          sampleValues: selectedData.slice(0, 3),
+        });
+
         if (selectedData.length > 0) {
           controller.highlightedData = selectedData;
+          controller.render();
         }
-        controller.render();
       }
     });
+  }
 
-    this.selectionUpdated();
+  clearSelection() {
+    this.selectedRows.clear();
+    this.tableRenderer.updateSelection([]);
   }
 }

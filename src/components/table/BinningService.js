@@ -15,6 +15,7 @@ export class BinningService {
       ...config,
     };
     this.validateConfig();
+    this.cacheBins = new Map();
   }
 
   validateConfig() {
@@ -429,5 +430,108 @@ export class BinningService {
     const range = max - min;
     const binCount = Math.min(20, Math.ceil(Math.sqrt(data.length)));
     return d3.range(min, max + range / binCount, range / binCount);
+  }
+
+  async binData(data, column, type, maxBins = 20) {
+    const values = data.map(d => d[column]).filter(d => d != null);
+    
+    console.log('Binning data:', {
+      column,
+      type,
+      sampleValues: values.slice(0, 5),
+      totalValues: values.length
+    });
+    
+    if (type === 'continuous') {
+      return this.binContinuousData(values, maxBins);
+    } else {
+      return this.binOrdinalData(values, maxBins);
+    }
+  }
+
+  binContinuousData(values, maxBins) {
+    const extent = d3.extent(values);
+    const generator = d3.bin()
+      .domain(extent)
+      .thresholds(maxBins);
+
+    const rawBins = generator(values);
+    
+    // Transform bins to store original values
+    const bins = rawBins.map(bin => ({
+      x0: bin.x0,
+      x1: bin.x1,
+      count: bin.length,
+      values: Array.from(bin),  // Store original values for selection
+      originalValues: Array.from(bin)  // Keep a separate copy
+    }));
+
+    console.log('Created continuous bins:', {
+      binCount: bins.length,
+      sampleBin: {
+        range: [bins[0]?.x0, bins[0]?.x1],
+        count: bins[0]?.count,
+        sampleValues: bins[0]?.values.slice(0, 3)
+      }
+    });
+
+    return bins;
+  }
+
+  binOrdinalData(values, maxBins) {
+    // Create a map to preserve original values
+    const valueGroups = new Map();
+    values.forEach(value => {
+      const key = String(value);
+      if (!valueGroups.has(key)) {
+        valueGroups.set(key, {
+          key: value,  // Keep original value
+          count: 0,
+          values: []
+        });
+      }
+      valueGroups.get(key).count++;
+      valueGroups.get(key).values.push(value);
+    });
+
+    // Convert to array and sort by count
+    let bins = Array.from(valueGroups.values())
+      .sort((a, b) => b.count - a.count);
+
+    // Handle maxBins limit
+    if (bins.length > maxBins) {
+      const otherBin = bins.slice(maxBins - 1).reduce(
+        (acc, bin) => ({
+          key: 'Other',
+          count: acc.count + bin.count,
+          values: [...acc.values, ...bin.values]
+        }),
+        { key: 'Other', count: 0, values: [] }
+      );
+      bins = [...bins.slice(0, maxBins - 1), otherBin];
+    }
+
+    console.log('Created ordinal bins:', {
+      binCount: bins.length,
+      sampleBin: {
+        key: bins[0]?.key,
+        count: bins[0]?.count,
+        sampleValues: bins[0]?.values.slice(0, 3)
+      }
+    });
+
+    return bins;
+  }
+
+  async binDataWithDuckDB(data, column, type, maxBins = 20) {
+    // First try to get from cache
+    const cacheKey = `${column}-${type}-${maxBins}`;
+    if (this.cacheBins.has(cacheKey)) {
+      return this.cacheBins.get(cacheKey);
+    }
+
+    const bins = await this.binData(data, column, type, maxBins);
+    this.cacheBins.set(cacheKey, bins);
+    return bins;
   }
 }
