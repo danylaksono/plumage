@@ -49,11 +49,52 @@ A typical Framework project looks like this:
 
 ## Command reference
 
-| Command           | Description                                              |
-| ----------------- | -------------------------------------------------------- |
-| `npm install`            | Install or reinstall dependencies                        |
-| `npm run dev`        | Start local preview server                               |
-| `npm run build`      | Build your static site, generating `./dist`              |
-| `npm run deploy`     | Deploy your app to Observable                            |
-| `npm run clean`      | Clear the local data loader cache                        |
-| `npm run observable` | Run commands like `observable help`                      |
+| Command              | Description                                 |
+| -------------------- | ------------------------------------------- |
+| `npm install`        | Install or reinstall dependencies           |
+| `npm run dev`        | Start local preview server                  |
+| `npm run build`      | Build your static site, generating `./dist` |
+| `npm run deploy`     | Deploy your app to Observable               |
+| `npm run clean`      | Clear the local data loader cache           |
+| `npm run observable` | Run commands like `observable help`         |
+
+## API Reference
+
+### Initialization
+
+The table must be initialized asynchronously:
+
+```js
+// const myTable = await new SorterTable(
+//   data,          // Array<any> | string | File - your data source
+//   columnNames,   // string[] - array of column names
+//   changeCallback // (event: TableEvent) => void - callback for table changes
+//   options        // Optional configuration object
+// );
+```
+
+### Displaying the Table
+
+After initialization, get the table's DOM node and add it to your page:
+
+```js
+// const tableNode = myTable.getNode();
+// Add to your page using your preferred method:
+// container.appendChild(tableNode);
+// Or for Observable notebooks:
+// display(tableNode);
+```
+
+### Options
+
+```ts
+interface TableOptions {
+  height?: string; // Container height (default: "400px")
+  width?: string; // Container width (default: "100%")
+  rowsPerPage?: number; // Number of rows per page (default: 50)
+  loadMoreThreshold?: number; // Scroll threshold for loading more rows (default: 100)
+  maxOrdinalBins?: number; // Maximum number of bins for ordinal data
+  continuousBinMethod?: string; // Binning method for continuous data
+  cellRenderers?: { [key: string]: (value: any, row: any) => HTMLElement }; // Custom cell renderers
+}
+```

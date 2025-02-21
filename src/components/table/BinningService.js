@@ -326,4 +326,108 @@ export class BinningService {
       max: d3.max(numericValues),
     };
   }
+
+  binColumn(
+    data,
+    columnDef,
+    maxOrdinalBins = 20,
+    continuousBinMethod = "sturges"
+  ) {
+    const columnName =
+      typeof columnDef === "string" ? columnDef : columnDef.column;
+    const type = columnDef.type || "ordinal";
+
+    // Handle unique columns
+    if (columnDef.unique) {
+      return {
+        type: "unique",
+        bins: [
+          {
+            x0: null,
+            x1: null,
+            length: 0,
+            key: "unique",
+          },
+        ],
+      };
+    }
+
+    // For all other columns, return type and empty bins array
+    // DuckDB will handle the actual binning
+    return {
+      type: type,
+      bins: [],
+    };
+  }
+
+  // Remove complex binning logic since DuckDB handles it
+  detectType(data, columnName) {
+    // This is now just a fallback, as DuckDB handles type detection
+    const sampleValue = data.find((d) => d[columnName] != null)?.[columnName];
+
+    if (!sampleValue) return "ordinal";
+    if (sampleValue instanceof Date) return "date";
+    if (typeof sampleValue === "number") return "continuous";
+    if (typeof sampleValue === "string" && !isNaN(parseFloat(sampleValue)))
+      return "continuous";
+
+    return "ordinal";
+  }
+
+  createBins(data, binrules) {
+    if (!data || !Array.isArray(data) || data.length === 0) {
+      console.warn("No valid data provided to createBins");
+      return [];
+    }
+
+    // Filter out null/undefined values
+    const validData = data.filter((d) => d !== null && d !== undefined);
+    if (validData.length === 0) {
+      return [];
+    }
+
+    if (binrules.unique) {
+      // Handle unique values case
+      return [{ length: validData.length, values: validData }];
+    }
+
+    // Handle continuous data
+    if (binrules.thresholds || typeof validData[0] === "number") {
+      const thresholds =
+        binrules.thresholds || this.generateThresholds(validData);
+      const histogram = d3
+        .bin()
+        .domain([d3.min(validData), d3.max(validData)])
+        .thresholds(thresholds);
+
+      const bins = histogram(validData);
+      return bins.map((bin) => ({
+        x0: bin.x0,
+        x1: bin.x1,
+        length: bin.length,
+        values: bin,
+        indeces: bin.map((v) => data.indexOf(v)).filter((i) => i !== -1),
+      }));
+    }
+
+    // Handle ordinal/nominal data
+    const valueGroups = d3.group(validData);
+    const bins = Array.from(valueGroups, ([key, values]) => ({
+      key: key,
+      length: values.length,
+      values: values,
+      indeces: values.map((v) => data.indexOf(v)).filter((i) => i !== -1),
+    }));
+
+    // Sort bins by frequency if not continuous
+    return bins.sort((a, b) => b.length - a.length);
+  }
+
+  generateThresholds(data) {
+    const min = d3.min(data);
+    const max = d3.max(data);
+    const range = max - min;
+    const binCount = Math.min(20, Math.ceil(Math.sqrt(data.length)));
+    return d3.range(min, max + range / binCount, range / binCount);
+  }
 }

@@ -1,35 +1,75 @@
 export class ColumnManager {
   constructor(
-    columnNames,
+    columnTypes,
     data,
     binningService,
     maxOrdinalBins,
     continuousBinMethod
   ) {
-    this.columnNames = columnNames;
-    this.columnTypes = {};
-    this.columns = columnNames.map((col) => {
-      if (typeof col === "string") {
-        return { column: col, unique: false };
-      } else {
-        return {
-          column: col.column,
-          alias: col.alias,
-          unique: col.unique || false,
-          type: col.type || null, // Add support for manual type definition
-        };
-      }
-    });
-    this.binningService = binningService;
-    this.maxOrdinalBins = maxOrdinalBins;
-    this.continuousBinMethod = continuousBinMethod;
+    this.columns = Array.isArray(columnTypes)
+      ? columnTypes.map((col) =>
+          this.initializeColumn(
+            col,
+            data,
+            binningService,
+            maxOrdinalBins,
+            continuousBinMethod
+          )
+        )
+      : [];
+  }
 
-    // Pre-populate column types if manually specified
-    this.columns.forEach((col) => {
-      if (col.type) {
-        this.columnTypes[col.column] = col.type;
+  initializeColumn(
+    col,
+    data,
+    binningService,
+    maxOrdinalBins,
+    continuousBinMethod
+  ) {
+    // Ensure we have a proper column object
+    const columnDef = typeof col === "string" ? { column: col } : { ...col };
+
+    // Extract properties with defaults
+    const colName = columnDef.column;
+    const isUnique = columnDef.unique || false;
+    const alias = columnDef.alias || null;
+    let type = columnDef.type || null;
+
+    if (!colName) {
+      console.error("Invalid column definition:", columnDef);
+      throw new Error("Column name is required");
+    }
+
+    // For unique columns, always use unique type
+    if (isUnique) {
+      type = "unique";
+    }
+
+    // Create base column definition
+    const result = {
+      column: colName,
+      alias,
+      unique: isUnique,
+      type,
+    };
+
+    // Skip binning for unique columns
+    if (!isUnique && binningService) {
+      try {
+        const binningResult = binningService.binColumn(
+          data,
+          result,
+          maxOrdinalBins,
+          continuousBinMethod
+        );
+        Object.assign(result, binningResult);
+      } catch (error) {
+        console.warn(`Failed to bin column ${colName}:`, error);
+        // Continue without binning data
       }
-    });
+    }
+
+    return result;
   }
 
   setColumnType(columnName, type) {
@@ -41,6 +81,12 @@ export class ColumnManager {
   }
 
   getColumnType(data, column) {
+    // If column is marked as unique in configuration, return 'unique'
+    const colConfig = this.columns.find((c) => c.column === column);
+    if (colConfig && colConfig.unique) {
+      return "unique";
+    }
+
     // If already cached, return the cached type
     if (this.columnTypes[column]) {
       return this.columnTypes[column];
@@ -55,11 +101,11 @@ export class ColumnManager {
       if (value instanceof Date) return "date";
 
       // Check for numbers
-      if (typeof value === "number" || !isNaN(Number(value))) {
-        // Check if it's really continuous or just a few discrete values
+      const numValue = Number(value);
+      if (!isNaN(numValue) && typeof value !== "string") {
+        // Only treat as number if it's not a string representation
         const uniqueValues = new Set(data.map((d) => d[column])).size;
         if (uniqueValues > 10) {
-          // Threshold for considering it continuous
           return "continuous";
         }
       }
@@ -68,7 +114,6 @@ export class ColumnManager {
       return "ordinal";
     }
 
-    // Default to ordinal if no clear type is found
     return "ordinal";
   }
 

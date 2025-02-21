@@ -21,13 +21,20 @@ export class SorterTable {
           loadMoreThreshold: options.loadMoreThreshold || 100,
         };
 
+        // Normalize column definitions upfront
+        this.normalizedColumns = this.normalizeColumnDefinitions(columnNames);
+
         // Create table element first
         this.table = this.createTableElement();
 
         this.duckDBTableName = "main_table";
-        this.duckDBProcessor = null;
+        this.duckDBProcessor = new DuckDBDataProcessor(
+          null,
+          this.duckDBTableName
+        );
         this.data = null;
         this.binningService = new BinningService();
+        this.filterService = null; // Will be initialized after DuckDB setup
         this.initialColumns = null;
         this._isUndoing = false;
         this.dataInd = [];
@@ -57,7 +64,7 @@ export class SorterTable {
             : true;
 
         // Await the initialization
-        await this.initializeTable(data, columnNames, options);
+        await this.initializeTable(data, this.normalizedColumns, options);
 
         return this;
       })();
@@ -65,27 +72,55 @@ export class SorterTable {
     throw new Error("SorterTable must be instantiated with new");
   }
 
-  async initializeTable(data, columnNames, options) {
+  normalizeColumnDefinitions(columns) {
+    return columns.map((col) => {
+      if (typeof col === "string") {
+        return { column: col };
+      }
+      if (typeof col === "object" && col !== null && col.column) {
+        return { ...col };
+      }
+      console.error("Invalid column definition:", col);
+      throw new Error("Invalid column definition");
+    });
+  }
+
+  async initializeTable(data, columnDefinitions, options) {
     try {
-      // Initialize DuckDB processor
-      this.duckDBProcessor = new DuckDBDataProcessor(
-        null,
-        this.duckDBTableName
-      );
+      // Initialize DuckDB first
       await this.duckDBProcessor.connect();
 
-      // Load data and get column types
+      // Now initialize FilterService with DuckDB processor
+      this.filterService = new FilterService(this.duckDBProcessor);
+
+      // Load data first
       await this.duckDBProcessor.loadData(data, this.detectDataFormat(data));
 
-      // Get column types from DuckDB
+      // Process column definitions and get types from DuckDB
       const columnTypes = await Promise.all(
-        columnNames.map(async (col) => {
-          const type = await this.duckDBProcessor.getTypeFromDuckDB(col);
-          return { column: col, type };
+        columnDefinitions.map(async (colDef) => {
+          const colName = typeof colDef === "string" ? colDef : colDef.column;
+          const type = await this.duckDBProcessor.getTypeFromDuckDB(colName);
+
+          // Initialize bins using DuckDB for non-unique columns
+          let binData = [];
+          if (!colDef.unique) {
+            binData = await this.duckDBProcessor.binDataWithDuckDB(
+              colName,
+              type,
+              options.maxOrdinalBins || 20
+            );
+          }
+
+          return {
+            ...(typeof colDef === "string" ? { column: colDef } : colDef),
+            type: colDef.type || type,
+            bins: binData,
+          };
         })
       );
 
-      // Get initial data with proper limit
+      // Get initial data
       this.data = await this.duckDBProcessor.query(
         `SELECT * FROM ${this.duckDBTableName} LIMIT ${this.options.rowsPerPage}`
       );
@@ -96,7 +131,7 @@ export class SorterTable {
 
       this.dataInd = d3.range(this.data.length);
 
-      // Initialize column manager with type information
+      // Initialize column manager with processed definitions
       this.columnManager = new ColumnManager(
         columnTypes,
         this.data,
@@ -105,11 +140,7 @@ export class SorterTable {
         options.continuousBinMethod
       );
 
-      if (!this.columnManager || !this.columnManager.columns) {
-        throw new Error("Column manager initialization failed");
-      }
-
-      // Store initial column state after columnManager is initialized
+      // Store initial column state
       this.initialColumns = JSON.parse(
         JSON.stringify(this.columnManager.columns)
       );
@@ -117,15 +148,16 @@ export class SorterTable {
       // Initialize table renderer
       this.tableRenderer = new TableRenderer(
         this.columnManager.columns,
-        this.preprocessData(this.data, columnNames),
-        this.options.cellRenderers,
+        this.data,
+        options.cellRenderers,
         this.selectRow.bind(this),
         this.unselectRow.bind(this),
         this.getRowIndex.bind(this)
       );
-      this.tableRenderer.table = this.table; // Assign the table element to the renderer
+      this.tableRenderer.setTable(this.table);
 
-      this.filterService = new FilterService(this.data);
+      // Initialize visualizations
+      this.initializeVisualizations();
 
       // Create initial table structure
       this.createHeader();
@@ -134,6 +166,43 @@ export class SorterTable {
       console.error("Failed to initialize table:", error);
       throw error;
     }
+  }
+
+  async initializeVisualizations() {
+    // Initialize visualization controllers for each column
+    this.visControllers = await Promise.all(
+      this.columnManager.columns.map(async (col) => {
+        if (col.unique) {
+          return null; // No visualization for unique columns
+        }
+
+        // Get binned data from DuckDB
+        const binData = await this.duckDBProcessor.binDataWithDuckDB(
+          col.column,
+          col.type,
+          this.options.maxOrdinalBins || 20
+        );
+
+        // Create visualization controller
+        const controller = new HistogramController(
+          col.column,
+          this.changed.bind(this)
+        );
+
+        // Set initial data
+        controller.setData({
+          type: col.type,
+          bins: binData,
+          ...(col.type === "ordinal" && {
+            nominals: binData
+              .map((bin) => bin.key)
+              .filter((k) => k !== undefined),
+          }),
+        });
+
+        return controller;
+      })
+    );
   }
 
   detectDataFormat(data) {
@@ -267,7 +336,15 @@ export class SorterTable {
 
   async filter() {
     try {
-      const filterClause = this.buildFilterClause();
+      // Get filter conditions based on selection
+      const filterClause = await this.filterService.applyFilter(
+        Array.from(this.selectedRows).map((i) => this.data[i]),
+        Object.keys(this.compoundSorting)[0]
+      );
+
+      if (!filterClause) {
+        return; // No valid filter conditions
+      }
 
       // Get total filtered count
       const countQuery = `
@@ -303,10 +380,33 @@ export class SorterTable {
       this.createTable();
 
       // Update visualizations with filtered data
-      this.visControllers.forEach((vc, vci) => {
-        const columnName = this.columnManager.columns[vci].column;
-        vc.setData(filteredData.map((row) => row[columnName]));
-      });
+      await Promise.all(
+        this.visControllers.map(async (vc, index) => {
+          if (!vc) return;
+
+          const columnName = this.columnManager.columns[index].column;
+          const columnType = this.columnManager.columns[index].type;
+
+          // Get updated bin data for the filtered dataset
+          const binData = await this.duckDBProcessor.binDataWithDuckDB(
+            columnName,
+            columnType,
+            this.options.maxOrdinalBins || 20,
+            filterClause // Pass filter clause to get bins for filtered data
+          );
+
+          // Update the visualization with new binned data
+          vc.setData({
+            type: columnType,
+            bins: binData,
+            ...(columnType === "ordinal" && {
+              nominals: binData
+                .map((bin) => bin.key)
+                .filter((k) => k !== undefined),
+            }),
+          });
+        })
+      );
 
       // Notify about filter change
       this.changed({
@@ -740,61 +840,108 @@ export class SorterTable {
     this.addingRows = true;
 
     try {
-      let min = this.lastLineAdded + 1;
-      let max = Math.min(min + howMany - 1, this.dataInd.length - 1);
+      const offset = this.lastLineAdded + 1;
+
+      // Get the current sort column and direction if any
+      let orderClause = "";
+      if (Object.keys(this.compoundSorting).length > 0) {
+        const sortCol = Object.keys(this.compoundSorting)[0];
+        const sortDir =
+          this.compoundSorting[sortCol].how === "up" ? "ASC" : "DESC";
+        orderClause = `ORDER BY ${this.duckDBProcessor.safeColumnName(
+          sortCol
+        )} ${sortDir}`;
+      }
 
       // Fetch the next batch of data from DuckDB
       const query = `
-        SELECT * 
-        FROM ${this.duckDBTableName}
-        LIMIT ${howMany} 
-        OFFSET ${min}
+        WITH ordered_data AS (
+          SELECT *, ROW_NUMBER() OVER (${orderClause}) as row_num
+          FROM ${this.duckDBTableName}
+        )
+        SELECT *
+        FROM ordered_data
+        WHERE row_num > ${offset} AND row_num <= ${offset + howMany}
       `;
 
       const newData = await this.duckDBProcessor.query(query);
 
-      // Extend the data array with new records
-      this.data.push(...newData);
+      if (newData && newData.length > 0) {
+        // Add new rows to table
+        for (let i = 0; i < newData.length; i++) {
+          const rowData = newData[i];
+          const rowIndex = this.lastLineAdded + 1 + i;
 
-      for (let row = min; row <= max; row++) {
-        let dataIndex = this.dataInd[row];
-        if (dataIndex === undefined) continue;
+          let tr = document.createElement("tr");
+          tr.selected = false;
+          Object.assign(tr.style, {
+            color: "grey",
+            borderBottom: "1px solid #ddd",
+          });
+          this.tableRenderer.tBody.appendChild(tr);
 
-        let tr = document.createElement("tr");
-        tr.selected = false;
-        Object.assign(tr.style, {
-          color: "grey",
-          borderBottom: "1px solid #ddd",
-        });
-        this.tableRenderer.tBody.appendChild(tr);
+          // Create cells for each column
+          this.columnManager.columns.forEach((c) => {
+            let td = document.createElement("td");
+            if (
+              typeof this.tableRenderer.cellRenderers[c.column] === "function"
+            ) {
+              td.innerHTML = "";
+              td.appendChild(
+                this.tableRenderer.cellRenderers[c.column](
+                  rowData[c.column],
+                  rowData
+                )
+              );
+            } else {
+              td.innerText = rowData[c.column];
+            }
 
-        this.columnManager.columns.forEach((c) => {
-          let td = document.createElement("td");
-          if (
-            typeof this.tableRenderer.cellRenderers[c.column] === "function"
-          ) {
-            td.innerHTML = "";
-            td.appendChild(
-              this.tableRenderer.cellRenderers[c.column](
-                this.data[dataIndex][c.column],
-                this.data[dataIndex]
-              )
-            );
-          } else {
-            td.innerText = this.data[dataIndex][c.column];
-          }
+            tr.appendChild(td);
+            td.style.color = "inherit";
+            td.style.fontWidth = "inherit";
+          });
 
-          tr.appendChild(td);
-          td.style.color = "inherit";
-          td.style.fontWidth = "inherit";
-        });
+          // Add click event listener
+          tr.addEventListener("click", (event) => {
+            if (this.shiftDown) {
+              // Select range
+              let start = Math.min(this.lastRowSelected, rowIndex);
+              let end = Math.max(this.lastRowSelected, rowIndex);
+              this.tableRenderer.tBody
+                .querySelectorAll("tr")
+                .forEach((tr, i) => {
+                  if (i >= start && i <= end) {
+                    if (!tr.selected) {
+                      this.selectRow(tr);
+                    }
+                  }
+                });
+            } else if (this.ctrlDown) {
+              // Toggle selection
+              if (tr.selected) {
+                this.unselectRow(tr);
+              } else {
+                this.selectRow(tr);
+              }
+            } else {
+              // Single select
+              this.clearSelection();
+              this.selectRow(tr);
+            }
+            this.lastRowSelected = rowIndex;
+            this.selectionUpdated();
+          });
+        }
 
-        // ...existing code for event listeners...
+        // Update data arrays
+        this.data.push(...newData);
+        this.dataInd.push(...newData.map((_, i) => this.lastLineAdded + 1 + i));
+        this.lastLineAdded += newData.length;
       }
-
-      this.lastLineAdded = max;
     } catch (error) {
       console.error("Error loading more data:", error);
+      throw error;
     } finally {
       this.addingRows = false;
     }
@@ -842,50 +989,91 @@ export class SorterTable {
   }
 
   async sortChanged(controller) {
-    this.history.push({ type: "sort", data: [...this.dataInd] });
-    this.compoundSorting = {};
-
-    const col = controller.getColumn();
-    const how = controller.getDirection();
-    const sortDirection = how === "up" ? "ASC" : "DESC";
-
     try {
-      // Get total count first
+      this.history.push({ type: "sort", data: [...this.dataInd] });
+      this.compoundSorting = {};
+
+      const colName = controller.getColumn();
+      const how = controller.getDirection();
+      const sortDirection = how === "up" ? "ASC" : "DESC";
+
+      // Get safe column name from DuckDB processor
+      const escapedColumn = this.duckDBProcessor.safeColumnName(colName);
+
+      // Handle BigInt columns by casting to DOUBLE in the ORDER BY clause
+      const orderByClause = `CAST(${escapedColumn} AS DOUBLE) ${sortDirection}`;
+
+      // First get total count for pagination info
       const countQuery = `SELECT COUNT(*) as total FROM ${this.duckDBTableName}`;
       const countResult = await this.duckDBProcessor.query(countQuery);
       const totalRows = countResult[0].total;
 
-      // Query with ROWID to maintain consistency
+      // Get sorted data with all necessary columns for visualization
       const query = `
-        SELECT *, ROWID 
-        FROM ${this.duckDBTableName}
-        ORDER BY ${col} ${sortDirection}
-        LIMIT ${this.options.rowsPerPage}
+        WITH sorted_data AS (
+          SELECT *, ROW_NUMBER() OVER (ORDER BY ${orderByClause}) as sort_order
+          FROM ${this.duckDBTableName}
+        )
+        SELECT *
+        FROM sorted_data
+        WHERE sort_order <= ${this.options.rowsPerPage}
       `;
 
       const sortedResult = await this.duckDBProcessor.query(query);
 
       // Update data with sorted results
       this.data = sortedResult;
+      this.dataInd = sortedResult.map((row, idx) => idx);
 
-      // Create new index mapping based on ROWIDs
-      this.dataInd = sortedResult.map((row) => row.ROWID);
-
-      // Update visualizations with the new order
-      this.visControllers.forEach((vc, index) => {
-        const columnName = this.columnManager.columns[index].column;
-        const columnData = sortedResult.map((row) => row[columnName]);
-        vc.setData(columnData);
-      });
-
-      // Store sort state for compound sorting
-      this.compoundSorting[col] = {
+      // Store sort state
+      this.compoundSorting[colName] = {
         how,
         order: Object.keys(this.compoundSorting).length,
       };
 
+      // Update each visualization controller with properly processed data
+      for (let i = 0; i < this.visControllers.length; i++) {
+        const vc = this.visControllers[i];
+        if (!vc) continue;
+
+        const columnName = this.columnManager.columns[i].column;
+        const columnType = this.columnManager.columns[i].type;
+
+        try {
+          // Get binned data for the column using DuckDB
+          const binData = await this.duckDBProcessor.binDataWithDuckDB(
+            columnName,
+            columnType,
+            this.options.maxOrdinalBins || 20
+          );
+
+          // Prepare visualization data
+          const visData = {
+            type: columnType,
+            bins: binData || [], // Ensure bins is at least an empty array
+            ...(columnType === "ordinal" && {
+              nominals:
+                binData?.map((bin) => bin.key).filter((k) => k !== undefined) ||
+                [],
+            }),
+          };
+
+          // Check if visualization controller has setData method before calling
+          if (vc && typeof vc.setData === "function") {
+            vc.setData(visData);
+          }
+        } catch (error) {
+          console.warn(
+            `Failed to update visualization for column ${columnName}:`,
+            error
+          );
+          // Continue with other visualizations even if one fails
+          continue;
+        }
+      }
+
       // Recreate table with new data
-      this.lastLineAdded = -1;
+      this.lastLineAdded = this.options.rowsPerPage - 1;
       this.createTable();
 
       // Notify about the sort change
@@ -897,6 +1085,7 @@ export class SorterTable {
       });
     } catch (error) {
       console.error("Sorting failed:", error);
+      throw error;
     }
   }
 
@@ -1244,13 +1433,18 @@ export class SorterTable {
       ];
 
       if (uniqueValues.length > 0) {
+        const escapedColumn = this.duckDBProcessor.safeColumnName(sortCol);
         const valueList = uniqueValues
-          .map((val) => (typeof val === "string" ? `'${val}'` : val))
+          .map((val) => {
+            if (val === null || val === undefined) return "NULL";
+            return `'${String(val).replace(/'/g, "''")}'`;
+          })
           .join(", ");
-        conditions.push(`${sortCol} IN (${valueList})`);
+
+        conditions.push(`${escapedColumn} IN (${valueList})`);
       }
     } else {
-      // Default to ROWID based filter
+      // For ROWID filtering
       conditions.push(`ROWID IN (${selectedIndices.join(", ")})`);
     }
 
