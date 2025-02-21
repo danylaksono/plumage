@@ -6,7 +6,7 @@ import { ColShiftController } from "./ColShiftController.js";
 import { HistogramController } from "./HistogramController.js";
 import { BinningService } from "./BinningService.js";
 import { FilterService } from "./FilterService.js"; // Import FilterService
-import { DuckDBDataProcessor } from "../_base/duckdb-processor.js"; // Add this import
+import { DuckDBDataProcessor } from "../_base/duckdb-processor.js";
 
 export class SorterTable {
   constructor(data, columnNames, changed, options = {}) {
@@ -157,7 +157,7 @@ export class SorterTable {
       this.tableRenderer.setTable(this.table);
 
       // Initialize visualizations
-      this.initializeVisualizations();
+      await this.initializeVisualizations();
 
       // Create initial table structure
       this.createHeader();
@@ -173,7 +173,7 @@ export class SorterTable {
     this.visControllers = await Promise.all(
       this.columnManager.columns.map(async (col) => {
         if (col.unique) {
-          return null; // No visualization for unique columns
+          return null;
         }
 
         // Get binned data from DuckDB
@@ -183,26 +183,33 @@ export class SorterTable {
           this.options.maxOrdinalBins || 20
         );
 
-        // Create visualization controller
-        const controller = new HistogramController(
-          col.column,
-          this.changed.bind(this)
-        );
+        // Create visualization controller with proper options
+        const controller = new HistogramController([], {
+          type: col.type,
+          thresholds: col.type === "continuous" ? 20 : undefined,
+          maxOrdinalBins: this.options.maxOrdinalBins,
+        });
 
-        // Set initial data
-        controller.setData({
+        // Link controller to table
+        controller.table = this;
+
+        // Set initial data with binning info
+        const visData = await this.getVisualizationData(col.column, binData);
+        await controller.initialize(visData, {
           type: col.type,
           bins: binData,
-          ...(col.type === "ordinal" && {
-            nominals: binData
-              .map((bin) => bin.key)
-              .filter((k) => k !== undefined),
-          }),
         });
 
         return controller;
       })
     );
+  }
+
+  async getVisualizationData(columnName, binData) {
+    // Get raw column data
+    const query = `SELECT "${columnName}" FROM ${this.duckDBTableName}`;
+    const result = await this.duckDBProcessor.query(query);
+    return result.map((row) => row[columnName]);
   }
 
   detectDataFormat(data) {
@@ -336,84 +343,44 @@ export class SorterTable {
 
   async filter() {
     try {
-      // Get filter conditions based on selection
       const filterClause = await this.filterService.applyFilter(
         Array.from(this.selectedRows).map((i) => this.data[i]),
         Object.keys(this.compoundSorting)[0]
       );
 
       if (!filterClause) {
-        return; // No valid filter conditions
+        return;
       }
 
-      // Get total filtered count
-      const countQuery = `
-        SELECT COUNT(*) as total 
-        FROM ${this.duckDBTableName}
-        WHERE ${filterClause}
-      `;
-      const countResult = await this.duckDBProcessor.query(countQuery);
-      const totalFiltered = countResult[0].total;
-
-      // Get filtered data with pagination
-      const query = `
-        SELECT *, ROWID
-        FROM ${this.duckDBTableName}
+      // Get filtered data
+      const filteredData = await this.duckDBProcessor.query(`
+        SELECT * FROM ${this.duckDBTableName}
         WHERE ${filterClause}
         LIMIT ${this.options.rowsPerPage}
-      `;
-
-      const filteredData = await this.duckDBProcessor.query(query);
+      `);
 
       // Update data and indices
       this.data = filteredData;
-      this.dataInd = filteredData.map((row) => row.ROWID);
+      this.dataInd = filteredData.map((_, idx) => idx);
 
-      // Save filter state in history
-      this.history.push({
-        type: "filter",
-        data: [...this.dataInd],
-        totalFiltered,
-      });
-
-      // Update table
-      this.createTable();
-
-      // Update visualizations with filtered data
+      // Update all histograms with filtered data while keeping original data visible
       await Promise.all(
-        this.visControllers.map(async (vc, index) => {
+        this.visControllers.map(async (vc, idx) => {
           if (!vc) return;
 
-          const columnName = this.columnManager.columns[index].column;
-          const columnType = this.columnManager.columns[index].type;
+          const columnName = this.columnManager.columns[idx].column;
+          const columnData = filteredData.map((row) => row[columnName]);
 
-          // Get updated bin data for the filtered dataset
-          const binData = await this.duckDBProcessor.binDataWithDuckDB(
-            columnName,
-            columnType,
-            this.options.maxOrdinalBins || 20,
-            filterClause // Pass filter clause to get bins for filtered data
-          );
-
-          // Update the visualization with new binned data
-          vc.setData({
-            type: columnType,
-            bins: binData,
-            ...(columnType === "ordinal" && {
-              nominals: binData
-                .map((bin) => bin.key)
-                .filter((k) => k !== undefined),
-            }),
-          });
+          // Update histogram with new data while keeping original data visible in background
+          await vc.updateData(columnData);
         })
       );
 
-      // Notify about filter change
+      this.createTable();
       this.changed({
         type: "filter",
         indeces: this.dataInd,
         rule: this.getSelectionRule(),
-        totalFiltered,
       });
     } catch (error) {
       console.error("Filtering failed:", error);
@@ -1458,5 +1425,41 @@ export class SorterTable {
       await this.duckDBProcessor.close();
       await this.duckDBProcessor.terminate();
     }
+  }
+
+  // Update the updateSelection method to handle histogram interactions
+  updateSelection(selectedValues, sourceColumn) {
+    // Clear existing selection if this is a new selection
+    if (!this.ctrlDown) {
+      this.clearSelection();
+    }
+
+    // Update table row selection
+    this.tableRenderer.tBody.querySelectorAll("tr").forEach((tr, idx) => {
+      const value = this.data[idx][sourceColumn];
+      if (selectedValues.has(value)) {
+        this.selectRow(tr);
+      }
+    });
+
+    // Update other histograms to reflect the selection
+    this.visControllers.forEach((controller, idx) => {
+      if (
+        controller &&
+        this.columnManager.columns[idx].column !== sourceColumn
+      ) {
+        const columnName = this.columnManager.columns[idx].column;
+        // Get data for the selected rows for this column
+        const selectedData = Array.from(this.selectedRows).map(
+          (rowIdx) => this.data[rowIdx][columnName]
+        );
+        if (selectedData.length > 0) {
+          controller.highlightedData = selectedData;
+        }
+        controller.render();
+      }
+    });
+
+    this.selectionUpdated();
   }
 }

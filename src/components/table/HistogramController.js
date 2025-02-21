@@ -1,442 +1,409 @@
 import * as d3 from "npm:d3";
 
-function HistogramController(data, binrules) {
-  let controller = this;
-  let div = document.createElement("div");
+export class HistogramController {
+  constructor(data, options = {}) {
+    this.container = document.createElement("div");
+    this.data = data;
+    this.options = {
+      width: 120,
+      height: 60,
+      margin: { top: 5, right: 8, bottom: 10, left: 8 },
+      colors: ["steelblue", "#666"], // Primary and secondary colors
+      ...options,
+    };
 
-  this.bins = [];
-  this.brush = null;
-  this.isBrushing = false;
+    this.originalData = {
+      bins: [],
+      type: options.type || "ordinal",
+    };
 
-  this.updateData = (d) => this.setData(d);
+    this.currentData = {
+      bins: [],
+      type: options.type || "ordinal",
+    };
 
-  // Reset the selection state of the histogram
-  this.resetSelection = () => {
-    this.bins.forEach((bin) => {
-      bin.selected = false;
+    this.selected = new Set();
+    this.highlightedData = null;
+    this.baseOpacity = 0.3;
+    this.setupContainer();
+    this.initialize(data, options);
+  }
+
+  setupContainer() {
+    Object.assign(this.container.style, {
+      width: this.options.width + "px",
+      height: this.options.height + "px",
+      position: "relative",
     });
+  }
 
-    this.svg.selectAll(".bar rect:nth-child(1)").attr("fill", "steelblue");
-  };
-
-  // console.log("------------------binrules outside setData: ", binrules);
-
-  this.setData = function (newData) {
+  async initialize(data, options) {
     try {
-      // Validate input data and initialize with defaults if needed
-      this.data = {
-        type: newData?.type || "ordinal",
-        bins: [],
-      };
-
-      // Clear the div and reset state
-      div.innerHTML = "";
-      this.bins = [];
-
-      // Setup SVG dimensions
-      const svgWidth = 120;
-      const svgHeight = 60;
-      const margin = { top: 5, right: 8, bottom: 10, left: 8 };
-      const width = svgWidth - margin.left - margin.right;
-      const height = svgHeight - margin.top - margin.bottom;
-
-      // Create SVG with background
-      this.svg = d3
-        .select(div)
-        .append("svg")
-        .attr("width", svgWidth)
-        .attr("height", svgHeight);
-
-      this.svg
-        .append("rect")
-        .attr("width", svgWidth)
-        .attr("height", svgHeight)
-        .attr("fill", "#f8f9fa")
-        .attr("rx", 4)
-        .attr("ry", 4);
-
-      // Process incoming bin data
-      if (newData && Array.isArray(newData.bins) && newData.bins.length > 0) {
-        this.data.bins = newData.bins.map((bin) => ({
-          ...bin,
-          length: this.safeNumber(bin.length),
-          value: typeof bin.value === "bigint" ? Number(bin.value) : bin.value,
-          x0: typeof bin.x0 === "bigint" ? Number(bin.x0) : bin.x0,
-          x1: typeof bin.x1 === "bigint" ? Number(bin.x1) : bin.x1,
-        }));
-      } else if (newData && Array.isArray(newData) && newData.length > 0) {
-        // If raw data is provided instead of bins, create bins
-        const values = newData.filter((d) => d !== null && d !== undefined);
-
-        if (this.data.type === "continuous") {
-          // Create continuous bins
-          const binGenerator = d3.bin();
-          const bins = binGenerator(values);
-          this.data.bins = bins.map((bin) => ({
-            x0: bin.x0,
-            x1: bin.x1,
-            length: bin.length,
-            values: bin,
-          }));
-        } else {
-          // Create ordinal bins
-          const valueCounts = d3.rollup(
-            values,
-            (v) => v.length,
-            (d) => d
-          );
-          this.data.bins = Array.from(valueCounts, ([key, count]) => ({
-            key,
-            length: count,
-            values: values.filter((v) => v === key),
-          }));
-        }
-      }
-
-      // Show "No data" message if still no valid bins
-      if (!this.data.bins || this.data.bins.length === 0) {
-        this.svg
-          .append("text")
-          .attr("x", svgWidth / 2)
-          .attr("y", svgHeight / 2)
-          .attr("text-anchor", "middle")
-          .attr("dominant-baseline", "middle")
-          .attr("font-size", "10px")
-          .attr("fill", "#666")
-          .text("No data");
-        return;
-      }
-
-      // Calculate scale ranges
-      const maxCount = Math.max(
-        1,
-        ...this.data.bins.map((b) => this.safeNumber(b.length))
-      );
-      const y = d3.scaleLinear().domain([0, maxCount]).range([height, 0]);
-
-      // Create bar groups
-      const barGroups = this.svg
-        .selectAll(".bar")
-        .data(this.data.bins)
-        .join("g")
-        .attr("class", "bar")
-        .attr(
-          "transform",
-          (d, i) =>
-            `translate(${(i * width) / this.data.bins.length + margin.left}, ${
-              margin.top
-            })`
-        );
-
-      // Add bars
-      barGroups
-        .append("rect")
-        .attr("x", 1)
-        .attr("width", Math.max(1, width / this.data.bins.length - 2))
-        .attr("y", (d) => y(this.safeNumber(d.length)))
-        .attr("height", (d) => height - y(this.safeNumber(d.length)))
-        .attr("fill", "steelblue")
-        .attr("rx", 2);
-
-      // Add interaction for ordinal/nominal data
-      if (this.data.type !== "continuous") {
-        barGroups
-          .append("rect")
-          .attr("width", width / this.data.bins.length)
-          .attr("height", height)
-          .attr("fill", "transparent")
-          .on("mouseover", (event, d) => {
-            if (!d.selected) {
-              d3.select(event.currentTarget.previousSibling).attr(
-                "fill",
-                "purple"
-              );
-            }
-            this.showTooltip(d, width, height, margin);
-          })
-          .on("mouseout", (event, d) => {
-            if (!d.selected) {
-              d3.select(event.currentTarget.previousSibling).attr(
-                "fill",
-                "steelblue"
-              );
-            }
-            this.hideTooltip();
-          })
-          .on("click", (event, d) => this.handleBarClick(d));
-      }
-
-      // Setup brush for continuous data
-      if (this.data.type === "continuous") {
-        this.setupBrush(width, height, margin);
-      }
+      await this.createBins(data, options);
+      this.render();
     } catch (error) {
-      console.error("Error in setData:", error);
-      // Show error state in visualization
-      this.showErrorState();
+      console.error("Failed to initialize histogram:", error);
+      this.showError();
     }
-  };
+  }
 
-  // Helper method to safely convert numbers
-  this.safeNumber = function (val) {
-    if (typeof val === "bigint") {
-      try {
-        return Number(val);
-      } catch (e) {
-        console.warn("BigInt conversion failed:", e);
-        return 0;
-      }
+  async createBins(data, options) {
+    if (!data || data.length === 0) {
+      return;
     }
-    return typeof val === "number" ? val : 0;
-  };
 
-  // Helper method to show tooltip
-  this.showTooltip = function (d, width, height, margin) {
-    this.svg.selectAll(".histogram-label").remove();
-    this.svg
-      .append("text")
-      .attr("class", "histogram-label")
-      .attr("x", width / 2)
-      .attr("y", height + margin.bottom)
-      .attr("font-size", "10px")
-      .attr("fill", "#444444")
-      .attr("text-anchor", "middle")
-      .text(d.key ? `${d.key}: ${d.length}` : `${d.x0} - ${d.x1}: ${d.length}`);
-  };
+    const values = data.filter((d) => d != null);
 
-  // Helper method to hide tooltip
-  this.hideTooltip = function () {
-    this.svg.selectAll(".histogram-label").remove();
-  };
+    if (options.type === "continuous") {
+      const binGenerator = d3
+        .bin()
+        .domain(d3.extent(values))
+        .thresholds(options.thresholds || d3.thresholdSturges);
 
-  // Helper method to show error state
-  this.showErrorState = function () {
-    div.innerHTML = "";
-    const svgWidth = 120;
-    const svgHeight = 60;
+      this.originalData.bins = binGenerator(values).map((bin) => ({
+        x0: bin.x0,
+        x1: bin.x1,
+        length: bin.length,
+        values: bin,
+      }));
 
-    this.svg = d3
-      .select(div)
+      this.originalData.type = "continuous";
+    } else {
+      const counts = d3.rollup(
+        values,
+        (v) => v.length,
+        (d) => d
+      );
+      this.originalData.bins = Array.from(counts, ([key, count]) => ({
+        key,
+        length: count,
+        values: values.filter((v) => v === key),
+      }));
+
+      this.originalData.type = "ordinal";
+    }
+
+    // Initially, current data is the same as original
+    this.currentData = structuredClone(this.originalData);
+  }
+
+  render() {
+    this.container.innerHTML = "";
+
+    const svg = d3
+      .select(this.container)
       .append("svg")
-      .attr("width", svgWidth)
-      .attr("height", svgHeight);
+      .attr("width", this.options.width)
+      .attr("height", this.options.height);
 
-    this.svg
-      .append("rect")
-      .attr("width", svgWidth)
-      .attr("height", svgHeight)
-      .attr("fill", "#fff0f0")
-      .attr("rx", 4)
-      .attr("ry", 4);
+    const { width, height } = this.getChartDimensions();
+    const g = svg
+      .append("g")
+      .attr(
+        "transform",
+        `translate(${this.options.margin.left},${this.options.margin.top})`
+      );
 
-    this.svg
-      .append("text")
-      .attr("x", svgWidth / 2)
-      .attr("y", svgHeight / 2)
-      .attr("text-anchor", "middle")
-      .attr("dominant-baseline", "middle")
-      .attr("font-size", "10px")
-      .attr("fill", "#ff4444")
-      .text("Error loading data");
-  };
+    // Create scales
+    const x = this.createXScale(width);
+    const y = this.createYScale(height);
 
-  // Setup brush for continuous data
-  this.setupBrush = function (width, height, margin) {
-    this.xScale = d3
-      .scaleLinear()
-      .domain([
-        d3.min(this.data.bins, (d) => d.x0),
-        d3.max(this.data.bins, (d) => d.x1),
-      ])
-      .range([0, width]);
+    // If there's a selection in another column and we have highlighted data
+    if (this.highlightedData) {
+      // Draw original data as background in grey
+      this.drawHistogramBars(
+        g,
+        this.originalData.bins,
+        x,
+        y,
+        "#cccccc",
+        this.baseOpacity
+      );
 
-    this.brush = d3
+      // Draw highlighted data in blue
+      const highlightedBins = this.createBinsFromData(this.highlightedData);
+      this.drawHistogramBars(
+        g,
+        highlightedBins,
+        x,
+        y,
+        this.options.colors[0],
+        1
+      );
+    } else if (this.selected.size > 0) {
+      // Draw original data as background in grey
+      this.drawHistogramBars(
+        g,
+        this.originalData.bins,
+        x,
+        y,
+        "#cccccc",
+        this.baseOpacity
+      );
+
+      // Draw selected bins in blue
+      const selectedBins = this.originalData.bins.filter((bin) =>
+        this.originalData.type === "continuous"
+          ? this.selected.has(bin.x0)
+          : this.selected.has(bin.key)
+      );
+      this.drawHistogramBars(g, selectedBins, x, y, this.options.colors[0], 1);
+    } else {
+      // No selection, draw all bars in blue
+      this.drawHistogramBars(
+        g,
+        this.originalData.bins,
+        x,
+        y,
+        this.options.colors[0],
+        1
+      );
+    }
+
+    // Add brush for continuous data or click handlers for ordinal
+    if (this.originalData.type === "continuous") {
+      this.setupBrush(svg, width, height);
+    } else {
+      this.setupOrdinalInteraction(g, x, y);
+    }
+  }
+
+  getChartDimensions() {
+    return {
+      width:
+        this.options.width -
+        this.options.margin.left -
+        this.options.margin.right,
+      height:
+        this.options.height -
+        this.options.margin.top -
+        this.options.margin.bottom,
+    };
+  }
+
+  createXScale(width) {
+    if (this.originalData.type === "continuous") {
+      return d3
+        .scaleLinear()
+        .domain([
+          d3.min(this.originalData.bins, (d) => d.x0),
+          d3.max(this.originalData.bins, (d) => d.x1),
+        ])
+        .range([0, width]);
+    } else {
+      return d3
+        .scaleBand()
+        .domain(this.originalData.bins.map((d) => d.key))
+        .range([0, width])
+        .padding(0.1);
+    }
+  }
+
+  createYScale(height) {
+    const maxCount = d3.max(this.originalData.bins, (d) => d.length);
+    return d3.scaleLinear().domain([0, maxCount]).range([height, 0]);
+  }
+
+  drawHistogramBars(g, bins, x, y, color, opacity) {
+    const { height } = this.getChartDimensions();
+
+    if (this.originalData.type === "continuous") {
+      g.selectAll(`.bar-${color}`)
+        .data(bins)
+        .join("rect")
+        .attr("class", `bar-${color}`)
+        .attr("x", (d) => x(d.x0))
+        .attr("width", (d) => Math.max(0, x(d.x1) - x(d.x0) - 1))
+        .attr("y", (d) => y(d.length))
+        .attr("height", (d) => height - y(d.length))
+        .attr("fill", color)
+        .attr("opacity", opacity)
+        .attr("rx", 2);
+    } else {
+      g.selectAll(`.bar-${color}`)
+        .data(bins)
+        .join("rect")
+        .attr("class", `bar-${color}`)
+        .attr("x", (d) => x(d.key))
+        .attr("width", x.bandwidth())
+        .attr("y", (d) => y(d.length))
+        .attr("height", (d) => height - y(d.length))
+        .attr("fill", (d) =>
+          this.selected.has(d.key) ? this.options.colors[0] : color
+        )
+        .attr("opacity", opacity)
+        .attr("rx", 2);
+    }
+  }
+
+  setupBrush(svg, width, height) {
+    const brush = d3
       .brushX()
       .extent([
         [0, 0],
         [width, height],
       ])
-      .on("end", this.handleBrush);
+      .on("end", (event) => this.handleBrush(event));
 
-    this.svg
+    svg
       .append("g")
       .attr("class", "brush")
-      .attr("transform", `translate(${margin.left}, ${margin.top})`)
-      .call(this.brush);
-  };
+      .attr(
+        "transform",
+        `translate(${this.options.margin.left},${this.options.margin.top})`
+      )
+      .call(brush);
+  }
 
-  // Add brushing for continuous data
-  // Handle brush end event
-  this.handleBrush = (event) => {
-    // Remove any existing histogram label(s)
-    this.svg.selectAll(".histogram-label").remove();
+  setupOrdinalInteraction(svg, x, y) {
+    const { height } = this.getChartDimensions();
 
+    svg
+      .selectAll(".bar-overlay")
+      .data(this.originalData.bins)
+      .join("rect")
+      .attr("class", "bar-overlay")
+      .attr("x", (d) => x(d.key))
+      .attr("width", x.bandwidth())
+      .attr("y", 0)
+      .attr("height", height)
+      .attr("fill", "transparent")
+      .on("click", (event, d) => this.handleBarClick(d))
+      .on("mouseover", (event, d) => this.showTooltip(d))
+      .on("mouseout", () => this.hideTooltip());
+  }
+
+  handleBrush(event) {
     if (!event.selection) {
-      // If no selection from brushing, reset everything
       this.resetSelection();
-      if (controller.table) {
-        controller.table.clearSelection();
-        controller.table.selectionUpdated();
-      }
       return;
     }
 
     const [x0, x1] = event.selection;
-    const [bound1, bound2] = event.selection.map(this.xScale.invert);
-    const binWidth = width / this.bins.length;
+    const selected = new Set();
 
-    // Compute which bins are selected and update their color
-    this.bins.forEach((bin, i) => {
-      const binStart = i * binWidth;
-      const binEnd = (i + 1) * binWidth;
-      bin.selected = binStart <= x1 && binEnd >= x0;
-      this.svg
-        .select(`.bar:nth-child(${i + 1}) rect:nth-child(1)`)
-        .attr("fill", bin.selected ? "orange" : "steelblue");
-    });
-
-    // Add histogram label
-    this.svg
-      // .data([d])
-      .append("text")
-      .attr("class", "histogram-label")
-      .join("text")
-      .attr("class", "histogram-label")
-      .attr("x", width / 2)
-      .attr("y", height + 10)
-      .attr("font-size", "10px")
-      .attr("fill", "#444444")
-      .attr("text-anchor", "middle")
-      // .text(`Selected: ${selectedLabels.join(", ")}`);
-      .text(`Range: ${Math.round(bound1)} - ${Math.round(bound2)}`);
-
-    // Update table selection if table exists
-    if (controller.table) {
-      controller.table.clearSelection();
-      this.bins.forEach((bin) => {
-        if (bin.selected) {
-          bin.indeces.forEach((rowIndex) => {
-            const tr = controller.table.tBody.querySelector(
-              `tr:nth-child(${rowIndex + 1})`
-            );
-            if (tr) {
-              controller.table.selectRow(tr);
-            }
-          });
-        }
-      });
-      controller.table.selectionUpdated();
-    }
-  };
-
-  this.updateVis = function () {
-    if (!this.data || !this.data.bins || !this.data.bins.length) {
-      console.warn("No valid bin data to visualize");
-      return;
-    }
-
-    const bins = this.data.bins;
-    const maxCount = Math.max(...bins.map((b) => b.length));
-
-    // Update each bar in the histogram
-    bins.forEach((bin, i) => {
-      const height = (bin.length / maxCount) * 100;
-      const bar = this.bars[i];
-
-      if (bar) {
-        // Update existing bar
-        bar.style.height = `${height}%`;
-        bar.setAttribute("data-count", bin.length);
-
-        // Update tooltip content
-        let tooltipContent = "";
-        if (this.data.type === "continuous") {
-          tooltipContent = `${bin.x0.toFixed(2)} - ${bin.x1.toFixed(2)}: ${
-            bin.length
-          }`;
-        } else {
-          tooltipContent = `${bin.key}: ${bin.length}`;
-        }
-        bar.setAttribute("title", tooltipContent);
+    this.originalData.bins.forEach((bin) => {
+      if (bin.x0 >= x0 && bin.x1 <= x1) {
+        bin.values.forEach((v) => selected.add(v));
       }
     });
-  };
 
-  this.table = null;
-  this.setData(data);
+    this.updateSelection(selected);
+  }
 
-  this.getNode = function () {
-    // Create container if it doesn't exist
-    if (!this.container) {
-      this.container = document.createElement("div");
-      Object.assign(this.container.style, {
-        width: "100%",
-        height: "40px",
-        display: "flex",
-        alignItems: "flex-end",
-        gap: "1px",
-        padding: "2px 0",
-      });
+  handleBarClick(bin) {
+    const newSelected = new Set(this.selected);
+
+    if (newSelected.has(bin.key)) {
+      newSelected.delete(bin.key);
+    } else {
+      newSelected.add(bin.key);
     }
 
-    // Clear existing bars
-    this.container.innerHTML = "";
-    this.bars = [];
+    this.updateSelection(newSelected);
+  }
 
-    // Skip visualization if no data or bins
-    if (!this.data?.bins || this.data.bins.length === 0) {
-      return this.container;
+  updateSelection(selected) {
+    this.selected = selected;
+
+    // Get the data for the selected bins
+    const selectedData = Array.from(selected).flatMap(
+      (key) =>
+        this.originalData.bins.find((b) =>
+          this.originalData.type === "continuous" ? b.x0 === key : b.key === key
+        )?.values || []
+    );
+
+    // Update highlighted data
+    this.highlightedData = selectedData;
+
+    // Update current data bins based on selection
+    if (this.originalData.type === "continuous") {
+      this.currentData.bins = this.createBinsFromData(selectedData);
+    } else {
+      this.currentData.bins = this.originalData.bins.map((bin) => ({
+        ...bin,
+        length: selected.has(bin.key) ? bin.length : 0,
+      }));
     }
 
-    const bins = this.data.bins;
-    const maxCount = Math.max(...bins.map((b) => b.length || 0));
+    this.render();
 
-    // Create bars
-    bins.forEach((bin) => {
-      const bar = document.createElement("div");
-      const height = maxCount > 0 ? (bin.length / maxCount) * 100 : 0;
+    // Notify table of selection if available
+    if (this.table) {
+      this.table.updateSelection(selected);
+    }
+  }
 
-      Object.assign(bar.style, {
-        flex: "1",
-        background: "#e0e0e0",
-        height: `${height}%`,
-        minHeight: "1px",
-        transition: "height 0.2s ease-out",
-        cursor: "pointer",
-      });
+  resetSelection() {
+    this.selected.clear();
+    this.highlightedData = null;
+    this.currentData = structuredClone(this.originalData);
+    this.render();
 
-      // Set tooltip content based on bin type
-      let tooltipContent;
-      if (this.data.type === "continuous") {
-        tooltipContent = `${bin.x0?.toFixed?.(2) ?? bin.x0} - ${
-          bin.x1?.toFixed?.(2) ?? bin.x1
-        }: ${bin.length}`;
-      } else if (this.data.type === "date") {
-        tooltipContent = `${bin.x0?.toLocaleDateString()} - ${bin.x1?.toLocaleDateString()}: ${
-          bin.length
-        }`;
-      } else {
-        tooltipContent = `${bin.key || bin.x0}: ${bin.length}`;
-      }
-      bar.setAttribute("title", tooltipContent);
-      bar.setAttribute("data-count", bin.length);
+    if (this.table) {
+      this.table.clearSelection();
+    }
+  }
 
-      // Add hover effect
-      bar.addEventListener("mouseover", () => {
-        bar.style.background = "#ccc";
-      });
-      bar.addEventListener("mouseout", () => {
-        bar.style.background = "#e0e0e0";
-      });
+  createBinsFromData(data) {
+    if (!data || data.length === 0) {
+      return [];
+    }
 
-      this.bars.push(bar);
-      this.container.appendChild(bar);
-    });
+    if (this.originalData.type === "continuous") {
+      const binGenerator = d3
+        .bin()
+        .domain([
+          d3.min(this.originalData.bins, (d) => d.x0),
+          d3.max(this.originalData.bins, (d) => d.x1),
+        ])
+        .thresholds(this.originalData.bins.map((b) => b.x0));
 
+      return binGenerator(data).map((bin) => ({
+        x0: bin.x0,
+        x1: bin.x1,
+        length: bin.length,
+        values: bin,
+      }));
+    } else {
+      const counts = d3.rollup(
+        data,
+        (v) => v.length,
+        (d) => d
+      );
+      return Array.from(counts, ([key, count]) => ({
+        key,
+        length: count,
+        values: data.filter((v) => v === key),
+      }));
+    }
+  }
+
+  updateData(newData) {
+    // Reset selections when data changes
+    this.selected.clear();
+    this.highlightedData = null;
+    this.initialize(newData, this.options);
+  }
+
+  showTooltip(bin) {
+    // Implement tooltip display
+  }
+
+  hideTooltip() {
+    // Implement tooltip hiding
+  }
+
+  showError() {
+    this.container.innerHTML = `
+      <div style="color: #ff4444; font-size: 10px; text-align: center; padding: 20px;">
+        Error loading data
+      </div>
+    `;
+  }
+
+  getNode() {
     return this.container;
-  };
-
-  return this;
+  }
 }
-
-export { HistogramController };
