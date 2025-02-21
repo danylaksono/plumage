@@ -2,19 +2,41 @@ export class TableRenderer {
   constructor(
     columns,
     data,
-    cellRenderers,
+    cellRenderers = {},
     selectRow,
     unselectRow,
     getRowIndex
   ) {
     this.columns = columns;
     this.data = data;
-    this.cellRenderers = cellRenderers || {};
+    this.cellRenderers = cellRenderers;
     this.selectRow = selectRow;
     this.unselectRow = unselectRow;
     this.getRowIndex = getRowIndex;
+
+    // Initialize table parts as null
+    this.table = null;
     this.tHead = null;
     this.tBody = null;
+  }
+
+  // Add setter for table element
+  setTable(table) {
+    this.table = table;
+    // Create thead and tbody if they don't exist
+    if (!this.tHead) {
+      this.tHead = document.createElement("thead");
+      this.table.appendChild(this.tHead);
+    }
+    if (!this.tBody) {
+      this.tBody = document.createElement("tbody");
+      this.table.appendChild(this.tBody);
+    }
+  }
+
+  // Get table element
+  getTable() {
+    return this.table;
   }
 
   // Method to render table rows

@@ -1,4 +1,4 @@
-import * as d3 from "d3";
+import * as d3 from "npm:d3";
 import { ColumnManager } from "./ColumnManager.js";
 import { TableRenderer } from "./TableRenderer.js";
 import { SortController } from "./SortController.js";
@@ -6,89 +6,63 @@ import { ColShiftController } from "./ColShiftController.js";
 import { HistogramController } from "./HistogramController.js";
 import { BinningService } from "./BinningService.js";
 import { FilterService } from "./FilterService.js"; // Import FilterService
-import { DuckDBDataProcessor } from "./DuckDBDataProcessor.js"; // Add this import
+import { DuckDBDataProcessor } from "../_base/duckdb-processor.js"; // Add this import
 
-export class sorterTable {
+export class SorterTable {
   constructor(data, columnNames, changed, options = {}) {
-    this.changed = changed;
-    this.options = {
-      containerHeight: options.height || "400px",
-      containerWidth: options.width || "100%",
-      rowsPerPage: options.rowsPerPage || 50,
-      loadMoreThreshold: options.loadMoreThreshold || 100,
-    };
+    if (new.target) {
+      // This ensures proper async initialization when using 'new'
+      return (async () => {
+        this.changed = changed;
+        this.options = {
+          containerHeight: options.height || "400px",
+          containerWidth: options.width || "100%",
+          rowsPerPage: options.rowsPerPage || 50,
+          loadMoreThreshold: options.loadMoreThreshold || 100,
+        };
 
-    this.duckDBTableName = "main_table";
-    this.duckDBProcessor = null;
-    this.data = null;
+        // Create table element first
+        this.table = this.createTableElement();
 
-    // Initialize the table
-    this.initializeTable(data, columnNames, options);
-
-    // Rest of the constructor remains the same
-    this._isUndoing = false;
-    this.dataInd = []; //d3.range(data.length); //No initial data index
-    this.sortControllers = [];
-    this.visControllers = [];
-    this.compoundSorting = {};
-    this.selected = [];
-    this.selectedColumn = null;
-    this.history = [];
-    this.ctrlDown = false;
-    this.shiftDown = false;
-    this.lastRowSelected = 0;
-    this.defaultLines = 1000;
-    this.lastLineAdded = 0;
-    this.additionalLines = 500;
-    this.addingRows = false;
-    this.rules = [];
-    this.selectedRows = new Set();
-    this.percentiles = [
-      0, 0.01, 0.02, 0.03, 0.04, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8,
-      0.9, 0.95, 0.96, 0.97, 0.98, 0.99, 1,
-    ];
-
-    this.showDefaultControls =
-      options.showDefaultControls !== undefined
-        ? options.showDefaultControls
-        : true;
-
-    this.table = this.createTableElement(); // Create the table element
-
-    this.initialColumns = JSON.parse(
-      JSON.stringify(this.columnManager.columns)
-    );
-    console.log("Initial columns:", this.columnManager.columns);
-
-    this.table.addEventListener("mousedown", (event) => {
-      if (event.shiftKey) {
-        this.shiftDown = true;
-      } else {
+        this.duckDBTableName = "main_table";
+        this.duckDBProcessor = null;
+        this.data = null;
+        this.binningService = new BinningService();
+        this.initialColumns = null;
+        this._isUndoing = false;
+        this.dataInd = [];
+        this.sortControllers = [];
+        this.visControllers = [];
+        this.compoundSorting = {};
+        this.selected = [];
+        this.selectedColumn = null;
+        this.history = [];
+        this.ctrlDown = false;
         this.shiftDown = false;
-      }
-    });
+        this.lastRowSelected = 0;
+        this.defaultLines = 1000;
+        this.lastLineAdded = 0;
+        this.additionalLines = 500;
+        this.addingRows = false;
+        this.rules = [];
+        this.selectedRows = new Set();
+        this.percentiles = [
+          0, 0.01, 0.02, 0.03, 0.04, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7,
+          0.8, 0.9, 0.95, 0.96, 0.97, 0.98, 0.99, 1,
+        ];
 
-    const style = document.createElement("style");
-    style.textContent = `
-      .sorter-table th {
-        transition: background-color 0.2s;
-      }
-      .sorter-table .selected-column {
-        background-color: #e3f2fd !important;
-      }
-      .histogram-tooltip {
-        font-size: 12px;
-        pointer-events: none;
-        z-index: 1000;
-      }
-      .bar rect {
-        transition: fill 0.2s;
-      }
-      .bar rect:hover {
-        fill: #4a90e2;
-      }
-    `;
-    document.head.appendChild(style);
+        this.showDefaultControls =
+          options.showDefaultControls !== undefined
+            ? options.showDefaultControls
+            : true;
+
+        // Await the initialization
+        await this.initializeTable(data, columnNames, options);
+
+        return this;
+      })();
+    }
+    throw new Error("SorterTable must be instantiated with new");
   }
 
   async initializeTable(data, columnNames, options) {
@@ -99,25 +73,48 @@ export class sorterTable {
         this.duckDBTableName
       );
       await this.duckDBProcessor.connect();
+
+      // Load data and get column types
       await this.duckDBProcessor.loadData(data, this.detectDataFormat(data));
 
-      // Get initial data
-      this.data = await this.duckDBProcessor.query(
-        `SELECT * FROM ${this.duckDBTableName}`
+      // Get column types from DuckDB
+      const columnTypes = await Promise.all(
+        columnNames.map(async (col) => {
+          const type = await this.duckDBProcessor.getTypeFromDuckDB(col);
+          return { column: col, type };
+        })
       );
+
+      // Get initial data with proper limit
+      this.data = await this.duckDBProcessor.query(
+        `SELECT * FROM ${this.duckDBTableName} LIMIT ${this.options.rowsPerPage}`
+      );
+
+      if (!this.data || this.data.length === 0) {
+        throw new Error("No data loaded from DuckDB");
+      }
+
       this.dataInd = d3.range(this.data.length);
 
-      // Initialize components
+      // Initialize column manager with type information
       this.columnManager = new ColumnManager(
-        columnNames,
+        columnTypes,
         this.data,
         this.binningService,
         options.maxOrdinalBins,
         options.continuousBinMethod
       );
 
-      this.columnManager.inferColumnTypesAndThresholds(this.data);
+      if (!this.columnManager || !this.columnManager.columns) {
+        throw new Error("Column manager initialization failed");
+      }
 
+      // Store initial column state after columnManager is initialized
+      this.initialColumns = JSON.parse(
+        JSON.stringify(this.columnManager.columns)
+      );
+
+      // Initialize table renderer
       this.tableRenderer = new TableRenderer(
         this.columnManager.columns,
         this.preprocessData(this.data, columnNames),
@@ -126,9 +123,11 @@ export class sorterTable {
         this.unselectRow.bind(this),
         this.getRowIndex.bind(this)
       );
+      this.tableRenderer.table = this.table; // Assign the table element to the renderer
 
       this.filterService = new FilterService(this.data);
 
+      // Create initial table structure
       this.createHeader();
       this.createTable();
     } catch (error) {
@@ -269,28 +268,56 @@ export class sorterTable {
   async filter() {
     try {
       const filterClause = this.buildFilterClause();
-      const filteredData = await this.duckDBProcessor.getFilteredData(
-        filterClause
-      );
 
-      this.dataInd = filteredData.map((row, index) => index);
-      this.history.push({ type: "filter", data: this.dataInd });
+      // Get total filtered count
+      const countQuery = `
+        SELECT COUNT(*) as total 
+        FROM ${this.duckDBTableName}
+        WHERE ${filterClause}
+      `;
+      const countResult = await this.duckDBProcessor.query(countQuery);
+      const totalFiltered = countResult[0].total;
 
+      // Get filtered data with pagination
+      const query = `
+        SELECT *, ROWID
+        FROM ${this.duckDBTableName}
+        WHERE ${filterClause}
+        LIMIT ${this.options.rowsPerPage}
+      `;
+
+      const filteredData = await this.duckDBProcessor.query(query);
+
+      // Update data and indices
+      this.data = filteredData;
+      this.dataInd = filteredData.map((row) => row.ROWID);
+
+      // Save filter state in history
+      this.history.push({
+        type: "filter",
+        data: [...this.dataInd],
+        totalFiltered,
+      });
+
+      // Update table
       this.createTable();
 
-      // Update visualizations
+      // Update visualizations with filtered data
       this.visControllers.forEach((vc, vci) => {
         const columnName = this.columnManager.columns[vci].column;
         vc.setData(filteredData.map((row) => row[columnName]));
       });
 
+      // Notify about filter change
       this.changed({
         type: "filter",
         indeces: this.dataInd,
         rule: this.getSelectionRule(),
+        totalFiltered,
       });
     } catch (error) {
       console.error("Filtering failed:", error);
+      throw error;
     }
   }
 
@@ -523,6 +550,11 @@ export class sorterTable {
   }
 
   createHeader() {
+    // Ensure TableRenderer has the table reference
+    if (!this.tableRenderer.table) {
+      this.tableRenderer.setTable(this.table);
+    }
+
     if (this.tableRenderer.tHead != null) {
       this.table.removeChild(this.tableRenderer.tHead);
     }
@@ -686,6 +718,11 @@ export class sorterTable {
   }
 
   createTable() {
+    // Ensure TableRenderer has the table reference
+    if (!this.tableRenderer.table) {
+      this.tableRenderer.setTable(this.table);
+    }
+
     if (this.tableRenderer.tBody != null)
       this.table.removeChild(this.tableRenderer.tBody);
 
@@ -696,102 +733,71 @@ export class sorterTable {
     this.addTableRows(this.defaultLines);
   }
 
-  addTableRows(howMany) {
+  async addTableRows(howMany) {
     if (this.addingRows) {
-      return; // Prevent overlapping calls
+      return;
     }
     this.addingRows = true;
 
-    let min = this.lastLineAdded + 1; // Corrected: Start from the next line
-    let max = Math.min(min + howMany - 1, this.dataInd.length - 1); // Corrected: Use Math.min to avoid exceeding dataInd.length
+    try {
+      let min = this.lastLineAdded + 1;
+      let max = Math.min(min + howMany - 1, this.dataInd.length - 1);
 
-    for (let row = min; row <= max; row++) {
-      let dataIndex = this.dataInd[row]; // Adjust index for dataInd
-      if (dataIndex === undefined) continue;
+      // Fetch the next batch of data from DuckDB
+      const query = `
+        SELECT * 
+        FROM ${this.duckDBTableName}
+        LIMIT ${howMany} 
+        OFFSET ${min}
+      `;
 
-      let tr = document.createElement("tr");
-      tr.selected = false;
-      Object.assign(tr.style, {
-        color: "grey",
-        borderBottom: "1px solid #ddd",
-      });
-      this.tableRenderer.tBody.appendChild(tr);
+      const newData = await this.duckDBProcessor.query(query);
 
-      this.columnManager.columns.forEach((c) => {
-        let td = document.createElement("td");
+      // Extend the data array with new records
+      this.data.push(...newData);
 
-        // Use custom renderer if available for this column
-        if (typeof this.tableRenderer.cellRenderers[c.column] === "function") {
-          td.innerHTML = "";
-          td.appendChild(
-            this.tableRenderer.cellRenderers[c.column](
-              this.data[dataIndex][c.column],
-              this.data[dataIndex]
-            )
-          );
-        } else {
-          td.innerText = this.data[dataIndex][c.column]; // Default: Set text content
-        }
+      for (let row = min; row <= max; row++) {
+        let dataIndex = this.dataInd[row];
+        if (dataIndex === undefined) continue;
 
-        tr.appendChild(td);
-        td.style.color = "inherit";
-        td.style.fontWidth = "inherit";
-      });
+        let tr = document.createElement("tr");
+        tr.selected = false;
+        Object.assign(tr.style, {
+          color: "grey",
+          borderBottom: "1px solid #ddd",
+        });
+        this.tableRenderer.tBody.appendChild(tr);
 
-      // Add event listeners for row selection
-      tr.addEventListener("click", (event) => {
-        let rowIndex = this.getRowIndex(tr);
-
-        if (this.shiftDown) {
-          // SHIFT-CLICK (select range)
-          let s = this.getSelection().map((s) => s.index);
-          if (s.length == 0) s = [rowIndex]; // If nothing selected, use current row index
-          let minSelIndex = Math.min(...s);
-          let maxSelIndex = Math.max(...s);
-
-          if (rowIndex <= minSelIndex) {
-            for (let i = rowIndex; i < minSelIndex; i++) {
-              const trToSelect =
-                this.tableRenderer.tBody.querySelectorAll("tr")[i];
-              if (trToSelect) this.selectRow(trToSelect);
-            }
-          } else if (rowIndex >= maxSelIndex) {
-            for (let i = maxSelIndex + 1; i <= rowIndex; i++) {
-              const trToSelect =
-                this.tableRenderer.tBody.querySelectorAll("tr")[i];
-              if (trToSelect) this.selectRow(trToSelect);
-            }
-          }
-        } else if (this.ctrlDown) {
-          // CTRL-CLICK (toggle individual row selection)
-          if (tr.selected) {
-            this.unselectRow(tr);
+        this.columnManager.columns.forEach((c) => {
+          let td = document.createElement("td");
+          if (
+            typeof this.tableRenderer.cellRenderers[c.column] === "function"
+          ) {
+            td.innerHTML = "";
+            td.appendChild(
+              this.tableRenderer.cellRenderers[c.column](
+                this.data[dataIndex][c.column],
+                this.data[dataIndex]
+              )
+            );
           } else {
-            this.selectRow(tr);
+            td.innerText = this.data[dataIndex][c.column];
           }
-        } else {
-          // NORMAL CLICK (clear selection and select clicked row)
-          this.clearSelection();
-          this.selectRow(tr);
-        }
 
-        this.selectionUpdated();
-      });
+          tr.appendChild(td);
+          td.style.color = "inherit";
+          td.style.fontWidth = "inherit";
+        });
 
-      // Add hover effect for rows
-      tr.addEventListener("mouseover", () => {
-        tr.style.backgroundColor = "#f0f0f0"; // Highlight on hover
-      });
+        // ...existing code for event listeners...
+      }
 
-      tr.addEventListener("mouseout", () => {
-        tr.style.backgroundColor = ""; // Reset background color
-      });
-
-      // this.lastLineAdded++;
-      this.lastLineAdded = row; // Update the last line added
+      this.lastLineAdded = max;
+    } catch (error) {
+      console.error("Error loading more data:", error);
+    } finally {
+      this.addingRows = false;
     }
-
-    this.addingRows = false;
   }
 
   resetTable() {
@@ -844,27 +850,50 @@ export class sorterTable {
     const sortDirection = how === "up" ? "ASC" : "DESC";
 
     try {
-      const sortedResult = await this.duckDBProcessor.getSortedData({
-        sortColumns: [col],
-        order: sortDirection,
-      });
+      // Get total count first
+      const countQuery = `SELECT COUNT(*) as total FROM ${this.duckDBTableName}`;
+      const countResult = await this.duckDBProcessor.query(countQuery);
+      const totalRows = countResult[0].total;
 
-      // Update data indices based on sorted results
-      this.dataInd = sortedResult.map((row, index) => index);
+      // Query with ROWID to maintain consistency
+      const query = `
+        SELECT *, ROWID 
+        FROM ${this.duckDBTableName}
+        ORDER BY ${col} ${sortDirection}
+        LIMIT ${this.options.rowsPerPage}
+      `;
 
-      // Update visualizations
+      const sortedResult = await this.duckDBProcessor.query(query);
+
+      // Update data with sorted results
+      this.data = sortedResult;
+
+      // Create new index mapping based on ROWIDs
+      this.dataInd = sortedResult.map((row) => row.ROWID);
+
+      // Update visualizations with the new order
       this.visControllers.forEach((vc, index) => {
         const columnName = this.columnManager.columns[index].column;
-        const columnData = this.dataInd.map((i) => sortedResult[i][columnName]);
+        const columnData = sortedResult.map((row) => row[columnName]);
         vc.setData(columnData);
       });
 
+      // Store sort state for compound sorting
+      this.compoundSorting[col] = {
+        how,
+        order: Object.keys(this.compoundSorting).length,
+      };
+
+      // Recreate table with new data
+      this.lastLineAdded = -1;
       this.createTable();
 
+      // Notify about the sort change
       this.changed({
         type: "sort",
         sort: this.compoundSorting,
         indeces: this.dataInd,
+        totalRows,
       });
     } catch (error) {
       console.error("Sorting failed:", error);
@@ -887,15 +916,19 @@ export class sorterTable {
   }
 
   getNode() {
+    // Ensure TableRenderer has the table reference before creating container
+    if (!this.tableRenderer.table) {
+      this.tableRenderer.setTable(this.table);
+    }
+
     let container = document.createElement("div");
-    container.style.width = "100%";
-    container.style.display = "flex";
-    container.style.flexDirection = "row";
     Object.assign(container.style, {
       height: this.options.containerHeight,
       width: this.options.containerWidth,
       overflow: "auto",
       position: "relative",
+      display: "flex",
+      flexDirection: "row",
     });
 
     // --- Sidebar ---
@@ -961,14 +994,174 @@ export class sorterTable {
       flex: "1",
       overflowX: "auto",
     });
+
+    // Set table width
     if (this.tableWidth) {
       this.table.style.width = this.tableWidth;
     } else {
-      this.table.style.width = "100%"; // Default to 100%
+      this.table.style.width = "100%";
     }
-    tableContainer.appendChild(this.table);
 
-    // --- Add sidebar and table container to main container ---
+    // Ensure table is properly initialized in renderer before adding to container
+    const table = this.tableRenderer.getTable() || this.table;
+    tableContainer.appendChild(table);
+
+    // Add components to container
+    container.appendChild(sidebar);
+    container.appendChild(tableContainer);
+
+    // Event listeners for shift and ctrl keys
+    container.addEventListener("keydown", (event) => {
+      if (event.shiftKey) {
+        this.shiftDown = true;
+      }
+      if (event.ctrlKey) {
+        this.ctrlDown = true;
+      }
+      event.preventDefault();
+    });
+
+    container.addEventListener("keyup", (event) => {
+      this.shiftDown = false;
+      this.ctrlDown = false;
+      event.preventDefault();
+    });
+
+    container.setAttribute("tabindex", "0"); // Make the container focusable
+
+    // Lazy loading listener
+    container.addEventListener("scroll", () => {
+      const threshold = 100;
+      const scrollTop = container.scrollTop;
+      const scrollHeight = container.scrollHeight;
+      const clientHeight = container.clientHeight;
+
+      if (scrollTop + clientHeight >= scrollHeight - threshold) {
+        if (!this.addingRows) {
+          this.addTableRows(this.additionalLines);
+        }
+      }
+    });
+
+    //deselection
+    // Add click listener to the container
+    container.addEventListener("click", (event) => {
+      // Check if the click target is outside any table row
+      let isOutsideRow = true;
+      let element = event.target;
+      while (element != null) {
+        if (
+          element == this.tableRenderer.tBody ||
+          element == this.tableRenderer.tHead
+        ) {
+          isOutsideRow = false;
+          break;
+        }
+        element = element.parentNode;
+      }
+
+      if (isOutsideRow) {
+        this.clearSelection();
+        this.resetHistogramSelections();
+        this.selectionUpdated();
+      }
+    });
+
+    return container;
+  }
+
+  getNode() {
+    // Ensure TableRenderer has the table reference before creating container
+    if (!this.tableRenderer.table) {
+      this.tableRenderer.setTable(this.table);
+    }
+
+    let container = document.createElement("div");
+    Object.assign(container.style, {
+      height: this.options.containerHeight,
+      width: this.options.containerWidth,
+      overflow: "auto",
+      position: "relative",
+      display: "flex",
+      flexDirection: "row",
+    });
+
+    // --- Sidebar ---
+    let sidebar = document.createElement("div");
+    Object.assign(sidebar.style, {
+      display: "flex",
+      flexDirection: "column",
+      alignItems: "center",
+      width: "35px",
+      padding: "5px",
+      borderRight: "1px solid #ccc",
+      marginRight: "2px",
+    });
+
+    // --- Filter Icon ---
+    let filterIcon = document.createElement("i");
+    filterIcon.classList.add("fas", "fa-filter");
+    Object.assign(filterIcon.style, {
+      cursor: "pointer",
+      marginBottom: "15px",
+      color: "gray",
+    });
+    filterIcon.setAttribute("title", "Apply Filter");
+    filterIcon.addEventListener("click", (event) => {
+      event.stopPropagation();
+      this.filter();
+    });
+    sidebar.appendChild(filterIcon);
+
+    // --- Undo Icon ---
+    let undoIcon = document.createElement("i");
+    undoIcon.classList.add("fas", "fa-undo");
+    Object.assign(undoIcon.style, {
+      cursor: "pointer",
+      marginBottom: "15px",
+      color: "gray",
+    });
+    undoIcon.setAttribute("title", "Undo");
+    undoIcon.addEventListener("click", (event) => {
+      event.stopPropagation();
+      this.undo();
+    });
+    sidebar.appendChild(undoIcon);
+
+    // --- Reset Icon ---
+    let resetIcon = document.createElement("i");
+    resetIcon.classList.add("fas", "fa-sync-alt");
+    Object.assign(resetIcon.style, {
+      cursor: "pointer",
+      marginBottom: "15px",
+      color: "gray",
+    });
+    resetIcon.setAttribute("title", "Reset Table");
+    resetIcon.addEventListener("click", (event) => {
+      event.stopPropagation();
+      this.resetTable();
+    });
+    sidebar.appendChild(resetIcon);
+
+    // --- Table Container ---
+    let tableContainer = document.createElement("div");
+    Object.assign(tableContainer.style, {
+      flex: "1",
+      overflowX: "auto",
+    });
+
+    // Set table width
+    if (this.tableWidth) {
+      this.table.style.width = this.tableWidth;
+    } else {
+      this.table.style.width = "100%";
+    }
+
+    // Ensure table is properly initialized in renderer before adding to container
+    const table = this.tableRenderer.getTable() || this.table;
+    tableContainer.appendChild(table);
+
+    // Add components to container
     container.appendChild(sidebar);
     container.appendChild(tableContainer);
 
@@ -1035,8 +1228,33 @@ export class sorterTable {
   // Add this helper method for building filter clause
   buildFilterClause() {
     if (this.selectedRows.size === 0) return "1=1";
+
+    // Get unique column values for selected rows
     const selectedIndices = Array.from(this.selectedRows);
-    return `ROWID IN (${selectedIndices.join(", ")})`;
+    const selectedData = selectedIndices.map((i) => this.data[i]);
+
+    // Build filter conditions based on selection
+    const conditions = [];
+
+    // Check if we have a compound sort active
+    if (Object.keys(this.compoundSorting).length > 0) {
+      const sortCol = Object.keys(this.compoundSorting)[0];
+      const uniqueValues = [
+        ...new Set(selectedData.map((row) => row[sortCol])),
+      ];
+
+      if (uniqueValues.length > 0) {
+        const valueList = uniqueValues
+          .map((val) => (typeof val === "string" ? `'${val}'` : val))
+          .join(", ");
+        conditions.push(`${sortCol} IN (${valueList})`);
+      }
+    } else {
+      // Default to ROWID based filter
+      conditions.push(`ROWID IN (${selectedIndices.join(", ")})`);
+    }
+
+    return conditions.length > 0 ? conditions.join(" AND ") : "1=1";
   }
 
   // Update cleanup method
