@@ -433,105 +433,159 @@ export class BinningService {
   }
 
   async binData(data, column, type, maxBins = 20) {
-    const values = data.map(d => d[column]).filter(d => d != null);
-    
-    console.log('Binning data:', {
-      column,
-      type,
-      sampleValues: values.slice(0, 5),
-      totalValues: values.length
-    });
-    
-    if (type === 'continuous') {
-      return this.binContinuousData(values, maxBins);
-    } else {
-      return this.binOrdinalData(values, maxBins);
-    }
-  }
+    try {
+      const values = data.map((d) => d[column]).filter((d) => d != null);
 
-  binContinuousData(values, maxBins) {
-    const extent = d3.extent(values);
-    const generator = d3.bin()
-      .domain(extent)
-      .thresholds(maxBins);
-
-    const rawBins = generator(values);
-    
-    // Transform bins to store original values
-    const bins = rawBins.map(bin => ({
-      x0: bin.x0,
-      x1: bin.x1,
-      count: bin.length,
-      values: Array.from(bin),  // Store original values for selection
-      originalValues: Array.from(bin)  // Keep a separate copy
-    }));
-
-    console.log('Created continuous bins:', {
-      binCount: bins.length,
-      sampleBin: {
-        range: [bins[0]?.x0, bins[0]?.x1],
-        count: bins[0]?.count,
-        sampleValues: bins[0]?.values.slice(0, 3)
+      if (values.length === 0) {
+        console.warn(`No valid values found for column ${column}`);
+        return [];
       }
-    });
 
-    return bins;
-  }
+      if (type === "continuous") {
+        // Convert string numbers to actual numbers
+        const numericValues = values
+          .map((v) => (typeof v === "string" ? Number(v) : v))
+          .filter((v) => !isNaN(v));
 
-  binOrdinalData(values, maxBins) {
-    // Create a map to preserve original values
-    const valueGroups = new Map();
-    values.forEach(value => {
-      const key = String(value);
-      if (!valueGroups.has(key)) {
-        valueGroups.set(key, {
-          key: value,  // Keep original value
-          count: 0,
-          values: []
+        const extent = d3.extent(numericValues);
+
+        // Handle single value case
+        if (extent[0] === extent[1]) {
+          return [this.createSingleValueBin(numericValues, extent[0])];
+        }
+
+        // Calculate optimal bin width using Freedman-Diaconis rule
+        const iqr =
+          d3.quantile(numericValues, 0.75) - d3.quantile(numericValues, 0.25);
+        const binWidth = (2 * iqr) / Math.pow(numericValues.length, 1 / 3);
+        const binCount = Math.min(
+          maxBins,
+          Math.ceil((extent[1] - extent[0]) / binWidth)
+        );
+
+        // Create thresholds
+        const thresholds = d3
+          .range(binCount + 1)
+          .map((i) => extent[0] + (i * (extent[1] - extent[0])) / binCount);
+
+        // Generate bins
+        const binner = d3.bin().domain(extent).thresholds(thresholds);
+
+        const bins = binner(numericValues);
+
+        console.log("Created continuous bins:", {
+          column,
+          binCount: bins.length,
+          extent,
+          sampleBin: bins[0],
+          totalValues: numericValues.length,
         });
+
+        return bins.map((bin) => ({
+          x0: bin.x0,
+          x1: bin.x1,
+          length: bin.length,
+          count: bin.length,
+          values: Array.from(bin),
+          mean: d3.mean(bin),
+          median: d3.median(bin),
+          min: d3.min(bin),
+          max: d3.max(bin),
+        }));
+      } else {
+        // Handle ordinal data
+        const valueGroups = d3.group(values, (d) => d);
+        const bins = Array.from(valueGroups, ([key, vals]) => ({
+          key,
+          x0: key,
+          x1: key,
+          length: vals.length,
+          count: vals.length,
+          values: vals,
+          mean: d3.mean(vals),
+          median: d3.median(vals),
+          min: d3.min(vals),
+          max: d3.max(vals),
+        }));
+
+        return bins.sort((a, b) => b.length - a.length).slice(0, maxBins);
       }
-      valueGroups.get(key).count++;
-      valueGroups.get(key).values.push(value);
-    });
-
-    // Convert to array and sort by count
-    let bins = Array.from(valueGroups.values())
-      .sort((a, b) => b.count - a.count);
-
-    // Handle maxBins limit
-    if (bins.length > maxBins) {
-      const otherBin = bins.slice(maxBins - 1).reduce(
-        (acc, bin) => ({
-          key: 'Other',
-          count: acc.count + bin.count,
-          values: [...acc.values, ...bin.values]
-        }),
-        { key: 'Other', count: 0, values: [] }
-      );
-      bins = [...bins.slice(0, maxBins - 1), otherBin];
+    } catch (error) {
+      console.error("Error in binData:", error);
+      return [];
     }
-
-    console.log('Created ordinal bins:', {
-      binCount: bins.length,
-      sampleBin: {
-        key: bins[0]?.key,
-        count: bins[0]?.count,
-        sampleValues: bins[0]?.values.slice(0, 3)
-      }
-    });
-
-    return bins;
   }
 
   async binDataWithDuckDB(data, column, type, maxBins = 20) {
-    // First try to get from cache
-    const cacheKey = `${column}-${type}-${maxBins}`;
-    if (this.cacheBins.has(cacheKey)) {
-      return this.cacheBins.get(cacheKey);
-    }
+    try {
+      // Get column statistics first
+      const values = data
+        .map((d) => d[column])
+        .filter((d) => d != null && !isNaN(Number(d)));
 
-    const bins = await this.binData(data, column, type, maxBins);
-    this.cacheBins.set(cacheKey, bins);
-    return bins;
+      if (values.length === 0) {
+        console.warn(`No valid numeric values found for column ${column}`);
+        return [];
+      }
+
+      const extent = d3.extent(values);
+      if (extent[0] === extent[1]) {
+        return [this.createSingleValueBin(values, extent[0])];
+      }
+
+      if (type === "continuous") {
+        // Calculate bin width using Freedman-Diaconis rule
+        const iqr = d3.quantile(values, 0.75) - d3.quantile(values, 0.25);
+        const binWidth = (2 * iqr) / Math.pow(values.length, 1 / 3);
+        const binCount = Math.min(
+          maxBins,
+          Math.ceil((extent[1] - extent[0]) / binWidth)
+        );
+
+        // Create thresholds
+        const thresholds = d3
+          .range(binCount + 1)
+          .map((i) => extent[0] + (i * (extent[1] - extent[0])) / binCount);
+
+        // Use d3's bin function
+        const binner = d3.bin().domain(extent).thresholds(thresholds);
+
+        const rawBins = binner(values);
+
+        // Format bins
+        return rawBins.map((bin) => ({
+          x0: bin.x0,
+          x1: bin.x1,
+          length: bin.length,
+          count: bin.length,
+          values: Array.from(bin),
+          mean: d3.mean(bin),
+          median: d3.median(bin),
+          min: d3.min(bin),
+          max: d3.max(bin),
+        }));
+      } else {
+        // Handle ordinal data
+        const valueGroups = d3.group(values, (d) => d);
+        const bins = Array.from(valueGroups, ([key, vals]) => ({
+          key,
+          x0: key,
+          x1: key,
+          length: vals.length,
+          count: vals.length,
+          values: vals,
+          mean: d3.mean(vals),
+          median: d3.median(vals),
+          min: d3.min(vals),
+          max: d3.max(vals),
+        }));
+
+        // Sort by frequency and limit to maxBins
+        return bins.sort((a, b) => b.length - a.length).slice(0, maxBins);
+      }
+    } catch (error) {
+      console.error("Error in binDataWithDuckDB:", error);
+      return [];
+    }
   }
 }

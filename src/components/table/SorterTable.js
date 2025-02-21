@@ -90,7 +90,7 @@ export class SorterTable {
       // Initialize DuckDB first
       await this.duckDBProcessor.connect();
 
-      // Now initialize FilterService with DuckDB processor
+      // Initialize FilterService with DuckDB processor
       this.filterService = new FilterService(this.duckDBProcessor);
 
       // Load data first
@@ -102,10 +102,15 @@ export class SorterTable {
           const colName = typeof colDef === "string" ? colDef : colDef.column;
           const type = await this.duckDBProcessor.getTypeFromDuckDB(colName);
 
-          // Initialize bins using DuckDB for non-unique columns
+          // Get initial data sample for binning
+          const sampleQuery = `SELECT "${colName}" FROM ${this.duckDBTableName} LIMIT 1000`;
+          const sampleData = await this.duckDBProcessor.query(sampleQuery);
+
+          // Initialize bins using binningService for non-unique columns
           let binData = [];
-          if (!colDef.unique) {
-            binData = await this.duckDBProcessor.binDataWithDuckDB(
+          if (!colDef.unique && type === "continuous") {
+            binData = await this.binningService.binData(
+              sampleData,
               colName,
               type,
               options.maxOrdinalBins || 20
@@ -129,9 +134,8 @@ export class SorterTable {
         throw new Error("No data loaded from DuckDB");
       }
 
+      // Initialize rest of the table
       this.dataInd = d3.range(this.data.length);
-
-      // Initialize column manager with processed definitions
       this.columnManager = new ColumnManager(
         columnTypes,
         this.data,
@@ -145,7 +149,7 @@ export class SorterTable {
         JSON.stringify(this.columnManager.columns)
       );
 
-      // Initialize table renderer
+      // Initialize table renderer and visualizations
       this.tableRenderer = new TableRenderer(
         this.columnManager.columns,
         this.data,
@@ -156,7 +160,6 @@ export class SorterTable {
       );
       this.tableRenderer.setTable(this.table);
 
-      // Initialize visualizations
       await this.initializeVisualizations();
 
       // Create initial table structure
@@ -181,6 +184,8 @@ export class SorterTable {
           type: col.type,
           thresholds: col.type === "continuous" ? 20 : undefined,
           maxOrdinalBins: this.options.maxOrdinalBins,
+          brushable: col.type === "continuous", // Enable brushing for continuous data
+          onBrush: (range) => this.updateSelection(range, col.column), // Add brush callback
         });
 
         // Link controller to table and set column name
@@ -762,28 +767,52 @@ export class SorterTable {
         const uniqueBinning = [
           { x0: "Unique", x1: "Unique", values: uniqueData },
         ];
-        // let visCtrl = new HistogramController(uniqueData, uniqueBinning); // { unique: true });
         let visCtrl = new HistogramController(uniqueData, { unique: true });
         visCtrl.table = this;
         visCtrl.columnName = c.column;
         this.visControllers.push(visCtrl);
         visTd.appendChild(visCtrl.getNode());
       } else {
-        // Create and add visualization controller (histogram) for non-unique columns
-        console.log(" >>>> Creating histogram for column:", c);
-        let visCtrl = new HistogramController(
-          this.dataInd.map((i) => this.data[i][c.column]),
-          c.type === "continuous"
-            ? { thresholds: c.thresholds, binInfo: c.bins }
-            : { nominals: c.nominals }
-          // this.getColumnType(c.column) === "continuous"
-          //   ? { thresholds: c.thresholds }
-          //   : { nominals: c.nominals }
-        );
-        visCtrl.table = this;
-        visCtrl.columnName = c.column;
-        this.visControllers.push(visCtrl);
-        visTd.appendChild(visCtrl.getNode());
+        // Create and initialize histogram for non-unique columns
+        const columnData = this.dataInd.map((i) => this.data[i][c.column]);
+
+        // Get binning configuration based on column type
+        const binConfig = async () => {
+          if (c.type === "continuous") {
+            const bins = await this.binningService.binData(
+              this.data,
+              c.column,
+              "continuous"
+            );
+            return {
+              type: "continuous",
+              thresholds: bins.length,
+              binInfo: bins,
+            };
+          } else {
+            return {
+              type: "ordinal",
+              nominals: Array.from(new Set(columnData)),
+            };
+          }
+        };
+
+        // Create histogram controller with proper configuration
+        binConfig().then((config) => {
+          let visCtrl = new HistogramController(columnData, config);
+          visCtrl.table = this;
+          visCtrl.columnName = c.column;
+          this.visControllers.push(visCtrl);
+          visTd.appendChild(visCtrl.getNode());
+
+          // Debug log
+          console.log("Created histogram for column:", {
+            column: c.column,
+            type: c.type,
+            binConfig: config,
+            dataLength: columnData.length,
+          });
+        });
       }
     });
 
@@ -1381,6 +1410,59 @@ export class SorterTable {
     this.updateOtherHistograms(sourceColumn);
 
     this.selectionUpdated();
+  }
+
+  handleBrushSelection(range, sourceColumn) {
+    if (!this.ctrlDown) {
+      this.clearSelection();
+    }
+
+    const columnDef = this.columnManager.columns.find(
+      (c) => c.column === sourceColumn
+    );
+    if (!columnDef || columnDef.type !== "continuous") return;
+
+    console.log("Processing brush selection:", {
+      range,
+      columnName: sourceColumn,
+    });
+
+    // Select rows within the brushed range
+    let selectedCount = 0;
+    Array.from(this.tableRenderer.tBody.children).forEach((tr, idx) => {
+      const rowValue = this.data[idx][sourceColumn];
+      if (rowValue != null && typeof rowValue === "number") {
+        if (rowValue >= range[0] && rowValue <= range[1]) {
+          this.selectRow(tr);
+          selectedCount++;
+        }
+      }
+    });
+
+    console.log("Brush selection complete:", {
+      totalSelected: selectedCount,
+      selectedRows: Array.from(this.selectedRows),
+    });
+
+    // Update other histograms
+    this.updateOtherHistograms(sourceColumn);
+    this.selectionUpdated();
+  }
+
+  // Update the updateSelection method to handle both discrete and continuous selections
+  updateSelection(selection, sourceColumn) {
+    if (
+      Array.isArray(selection) &&
+      selection.length === 2 &&
+      typeof selection[0] === "number" &&
+      typeof selection[1] === "number"
+    ) {
+      // Handle brush selection for continuous data
+      this.handleBrushSelection(selection, sourceColumn);
+    } else {
+      // Handle existing discrete selection
+      this.handleHistogramSelection(selection, sourceColumn);
+    }
   }
 
   selectRow(tr) {
