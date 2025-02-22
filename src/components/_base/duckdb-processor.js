@@ -11,6 +11,7 @@ export class DuckDBDataProcessor {
     if (!this.duckdb) {
       try {
         // Import DuckDB only when needed
+        // Define the bundles for DuckDB
         const bundle = await duckdb.selectBundle({
           mvp: {
             mainModule: import.meta.resolve(
@@ -35,6 +36,7 @@ export class DuckDBDataProcessor {
 
         this.duckdb = new duckdb.AsyncDuckDB(logger, worker);
         await this.duckdb.instantiate(bundle.mainModule);
+        this.conn = await this.duckdb.connect();
       } catch (error) {
         throw new Error(`Failed to initialize DuckDB: ${error.message}`);
       }
@@ -50,7 +52,9 @@ export class DuckDBDataProcessor {
       // Clean up any existing table with the same name
       await this.conn.query(`DROP TABLE IF EXISTS ${this.tableName}`);
     } catch (error) {
-      throw new Error(`Failed to establish DuckDB connection: ${error.message}`);
+      throw new Error(
+        `Failed to establish DuckDB connection: ${error.message}`
+      );
     }
   }
 
@@ -67,7 +71,7 @@ export class DuckDBDataProcessor {
         this.duckdb = null;
       }
     } catch (error) {
-      console.error('Error during cleanup:', error);
+      console.error("Error during cleanup:", error);
       // Continue with cleanup even if there's an error
     }
   }
@@ -85,7 +89,7 @@ export class DuckDBDataProcessor {
   // Add this helper method to safely handle column names
   safeColumnName(column) {
     // Handle both string and object column definitions
-    const columnName = typeof column === 'string' ? column : column.column;
+    const columnName = typeof column === "string" ? column : column.column;
     if (!columnName) {
       throw new Error(`Invalid column definition: ${JSON.stringify(column)}`);
     }
@@ -98,34 +102,40 @@ export class DuckDBDataProcessor {
       const escapedColumn = this.safeColumnName(column);
       const query = `
         SELECT typeof(${escapedColumn}) as col_type
-        FROM ${this.tableName}
+      FROM ${this.tableName}
         WHERE ${escapedColumn} IS NOT NULL
-        LIMIT 1
-      `;
+      LIMIT 1
+    `;
 
       const result = await this.conn.query(query);
       const resultArray = result.toArray();
 
       if (resultArray.length === 0) {
-        return "ordinal";
+        // Handle the case where the result set is empty
+        return "ordinal"; // Or some other default type
       }
 
       const type = resultArray[0].col_type.toLowerCase();
 
       // Map DuckDB types to our column types
-      if (type.includes('varchar') || type.includes('text')) {
+      if (type.includes("varchar") || type.includes("text")) {
         return "ordinal";
       }
-      if (type.includes('float') || type.includes('double') || type.includes('decimal') || 
-          type.includes('integer') || type.includes('bigint')) {
+      if (
+        type.includes("float") ||
+        type.includes("double") ||
+        type.includes("decimal") ||
+        type.includes("integer") ||
+        type.includes("bigint")
+      ) {
         return "continuous";
       }
-      if (type.includes('date') || type.includes('timestamp')) {
+      if (type.includes("date") || type.includes("timestamp")) {
         return "date";
       }
       return "ordinal";
     } catch (error) {
-      console.error('Error getting type from DuckDB:', error);
+      console.error("Error getting type from DuckDB:", error);
       return "ordinal";
     }
   }
@@ -162,153 +172,134 @@ export class DuckDBDataProcessor {
     }
   }
 
-  async binDataWithDuckDB(column, type, maxOrdinalBins = 20, filterClause = "1=1") {
-    try {
-      const escapedColumn = this.safeColumnName(column);
-      
-      // Check if this is a unique/ID column
-      const uniqueCheckQuery = `
-        SELECT COUNT(*) as total_count, COUNT(DISTINCT ${escapedColumn}) as unique_count
-        FROM ${this.tableName}
-        WHERE ${escapedColumn} IS NOT NULL
-      `;
-      const uniqueCheck = await this.conn.query(uniqueCheckQuery);
-      const result = uniqueCheck.toArray()[0];
-      
-      // If the column has all unique values, return a single bin
-      if (result.total_count === result.unique_count) {
-        return [{
-          key: 'unique',
-          x0: 'unique',
-          x1: 'unique',
-          length: result.total_count,
-          count: result.total_count
-        }];
-      }
+  async binDataWithDuckDB(column, type, maxOrdinalBins = 20) {
+    let query;
 
-      // For non-unique columns, proceed with normal binning
-      let query;
-      switch (type?.toLowerCase()) {
-        case "continuous":
-          query = `
-            WITH stats AS (
-              SELECT
-                MIN(${escapedColumn}) as min_val,
-                MAX(${escapedColumn}) as max_val,
-                (MAX(${escapedColumn}) - MIN(${escapedColumn})) / 10.0 as bin_width
-              FROM ${this.tableName}
-              WHERE ${escapedColumn} IS NOT NULL
-              AND ${filterClause}
-            ),
-            bins AS (
-              SELECT
-                min_val + ((value - 1) * bin_width) as x0,
-                min_val + (value * bin_width) as x1
-              FROM generate_series(1, 10) vals(value), stats
-              WHERE min_val IS NOT NULL AND max_val IS NOT NULL
-            )
+    switch (type) {
+      case "continuous":
+        // First get the column type to handle casting properly
+        const typeQuery = `SELECT typeof(${column}) as col_type
+                          FROM ${this.tableName}
+                          WHERE ${column} IS NOT NULL
+                          LIMIT 1`;
+        const typeResult = await this.logQuery(typeQuery, "Get Column Type");
+        // const colType = typeResult.toArray()[0].col_type;
+        // const numericType = this.getDuckDBType(colType);\
+        const typeArray = typeResult.toArray(); // Get the array of results
+        const colType = typeArray.length > 0 ? typeArray[0].col_type : null; // Check if there are results
+
+        // Handle null colType
+        if (!colType) {
+          console.warn(
+            `Column ${column} has no non-null values, defaulting to ordinal type.`
+          );
+          // If there are no non-null values, default to ordinal type
+          return this.binDataWithDuckDB(column, "ordinal", maxOrdinalBins);
+        }
+
+        const numericType = this.getDuckDBType(colType);
+
+        query = `
+          WITH stats AS (
             SELECT
-              x0,
-              x1,
-              COUNT(*) as length,
-              MIN(${escapedColumn}) as min_val,
-              MAX(${escapedColumn}) as max_val,
-              AVG(${escapedColumn}) as mean
+              MIN(${column}) as min_val,
+              MAX(${column}) as max_val,
+              COUNT(*) as n,
+              (MAX(${column}) - MIN(${column})) as range
             FROM ${this.tableName}
-            CROSS JOIN bins
-            WHERE ${escapedColumn} >= x0 
-            AND ${escapedColumn} < x1
-            AND ${filterClause}
-            GROUP BY x0, x1
-            ORDER BY x0
-          `;
-          break;
-
-        case "date":
-          query = `
-            WITH date_bounds AS (
-              SELECT
-                date_trunc('day', MIN(${escapedColumn})) as min_date,
-                date_trunc('day', MAX(${escapedColumn})) as max_date
-              FROM ${this.tableName}
-              WHERE ${escapedColumn} IS NOT NULL
-              AND ${filterClause}
-            ),
-            date_series AS (
-              SELECT 
-                generate_series(
-                  min_date,
-                  max_date,
-                  INTERVAL '1 day'
-                ) as date_bin
-              FROM date_bounds
-            )
+            WHERE ${column} IS NOT NULL
+          ),
+          bin_params AS (
             SELECT
-              date_bin as x0,
-              date_bin + INTERVAL '1 day' as x1,
-              COUNT(*) as length
-            FROM ${this.tableName}
-            JOIN date_series ON date_trunc('day', ${escapedColumn}) = date_bin
-            WHERE ${filterClause}
-            GROUP BY date_bin
-            ORDER BY date_bin
-          `;
-          break;
-
-        case "ordinal":
-        default:
-          query = `
-            WITH value_counts AS (
-              SELECT
-                ${escapedColumn} as key,
-                COUNT(*) as length
-              FROM ${this.tableName}
-              WHERE ${escapedColumn} IS NOT NULL
-              AND ${filterClause}
-              GROUP BY ${escapedColumn}
-              ORDER BY length DESC
-              LIMIT ${maxOrdinalBins}
-            )
+              min_val,
+              max_val,
+              (max_val - min_val) / 10.0 as bin_width
+            FROM stats
+          ),
+          bins AS (
             SELECT
-              key,
-              key as x0,
-              key as x1,
-              length,
-              length as count
-            FROM value_counts
-            UNION ALL
-            SELECT
-              'Other' as key,
-              'Other' as x0,
-              'Other' as x1,
-              SUM(cnt) as length,
-              SUM(cnt) as count
-            FROM (
-              SELECT COUNT(*) as cnt
-              FROM ${this.tableName}
-              WHERE ${escapedColumn} IS NOT NULL
-              AND ${filterClause}
-              AND ${escapedColumn} NOT IN (SELECT key FROM value_counts)
-              GROUP BY ${escapedColumn}
-            ) as others
-            HAVING SUM(cnt) > 0
-            ORDER BY length DESC
-          `;
-          break;
-      }
+              min_val + (CAST(value - 1 AS ${colType}) * bin_width) as x0,
+              min_val + (CAST(value AS ${colType}) * bin_width) as x1
+            FROM generate_series(1, 10) vals(value), bin_params
+          )
+          SELECT
+            x0,
+            x1,
+            COUNT(${column}) as length
+          FROM ${this.tableName}
+          CROSS JOIN bins
+          WHERE ${column} >= x0 AND ${column} < x1
+          GROUP BY x0, x1
+          ORDER BY x0
+        `;
+        break;
 
-      const binResult = await this.conn.query(query);
-      const bins = binResult.toArray().map(row => ({
-        ...row,
-        x0: type === "date" ? new Date(row.x0) : row.x0,
-        x1: type === "date" ? new Date(row.x1) : row.x1
-      }));
+      case "date":
+        query = `
+          SELECT
+            date_trunc('day', ${column}) as x0,
+            date_trunc('day', ${column}) + INTERVAL '1 day' as x1,
+            COUNT(*) as length
+          FROM ${this.tableName}
+          WHERE ${column} IS NOT NULL
+          GROUP BY date_trunc('day', ${column})
+          ORDER BY x0
+        `;
+        break;
 
-      return bins;
-    } catch (error) {
-      console.error('Error in binDataWithDuckDB:', error);
-      return [];
+      case "ordinal":
+        query = `
+          SELECT
+            ${column} as key,
+            ${column} as x0,
+            ${column} as x1,
+            COUNT(*) as length
+          FROM ${this.tableName}
+          WHERE ${column} IS NOT NULL
+          GROUP BY ${column}
+          ORDER BY length DESC
+          LIMIT ${maxOrdinalBins}
+        `;
+        break;
     }
+
+    // console.log("DuckDB Query:", query);
+    const result = await this.conn.query(query);
+    // console.log("DuckDB Result:", result);
+    let bins = result.toArray().map((row) => ({
+      ...row,
+      x0: type === "date" ? new Date(row.x0) : row.x0,
+      x1: type === "date" ? new Date(row.x1) : row.x1,
+    }));
+
+    if (type === "ordinal" && bins.length === maxOrdinalBins) {
+      const othersQuery = `
+        WITH ranked AS (
+          SELECT ${column}, COUNT(*) as cnt
+          FROM ${this.tableName}
+          WHERE ${column} IS NOT NULL
+          GROUP BY ${column}
+          ORDER BY cnt DESC
+          OFFSET ${maxOrdinalBins - 1}
+        )
+        SELECT SUM(cnt) as length
+        FROM ranked
+      `;
+
+      const othersResult = await this.conn.query(othersQuery);
+      const othersCount = othersResult.toArray()[0].length;
+
+      if (othersCount > 0) {
+        bins.push({
+          key: "Other",
+          x0: "Other",
+          x1: "Other",
+          length: othersCount,
+        });
+      }
+    }
+
+    return bins;
   }
 
   async loadData(source, format) {
@@ -328,10 +319,13 @@ export class DuckDBDataProcessor {
         }
         await this.loadJSONData(source);
       } else if (source instanceof File) {
+        // Handle File object
         await this.loadFileData(source, format);
       } else if (typeof source === "string") {
         if (!format) {
-          throw new Error("Format must be specified for URL/file path data sources");
+          throw new Error(
+            "Format must be specified for URL/file path data sources"
+          );
         }
         await this.loadURLData(source, format);
       } else {
@@ -339,19 +333,19 @@ export class DuckDBDataProcessor {
       }
 
       // Verify data loading
-      const countQuery = `SELECT COUNT(*) as count FROM ${this.tableName}`;
-      const countResult = await this.conn.query(countQuery);
+      const countResult = await this.conn.query(
+        `SELECT COUNT(*) as count FROM ${this.tableName}`
+      );
       const count = countResult.toArray()[0].count;
 
       if (count === 0) {
-        throw new Error("No data was loaded into the table");
+        throw new Error("No data was loaded");
       }
 
       // Check table structure
       const structureQuery = `DESCRIBE ${this.tableName}`;
       const structure = await this.conn.query(structureQuery);
-      console.log('Table structure:', structure.toArray());
-
+      console.log("Table structure:", structure.toArray());
     } catch (error) {
       const errorMessage = `Failed to load data: ${error.message}`;
       console.error(errorMessage);
@@ -367,12 +361,12 @@ export class DuckDBDataProcessor {
 
       // Infer schema from the first object
       const schema = this.inferSchema(data[0]);
-      
+
       // Create table with properly escaped column names
       const columns = Object.entries(schema)
         .map(([name, type]) => `${this.safeColumnName(name)} ${type}`)
         .join(", ");
-      
+
       const createTableSQL = `CREATE TABLE ${this.tableName} (${columns})`;
       await this.conn.query(createTableSQL);
 
@@ -383,18 +377,25 @@ export class DuckDBDataProcessor {
 
         // Generate INSERT query with escaped column names
         const columnList = Object.keys(schema)
-          .map(col => this.safeColumnName(col))
+          .map((col) => this.safeColumnName(col))
           .join(", ");
 
-        const values = batch.map(row => {
-          const rowValues = Object.keys(schema).map(col => {
-            const val = row[col];
-            if (val === null || val === undefined) return "NULL";
-            // Convert all values to strings for consistency with schema
-            return `'${String(val).replace(/'/g, "''")}'`;
-          });
-          return `(${rowValues.join(", ")})`;
-        }).join(", ");
+        const values = batch
+          .map((row) => {
+            const rowValues = Object.keys(schema).map((col) => {
+              let val = row[col];
+              if (val === null || val === undefined) return "NULL";
+
+              // Format Date values to 'YYYY-MM-DD HH:MM:SS'
+              if (val instanceof Date) {
+                val = val.toISOString().slice(0, 19).replace("T", " ");
+              }
+              // Convert all values to strings for consistency with schema
+              return `'${String(val).replace(/'/g, "''")}'`;
+            });
+            return `(${rowValues.join(", ")})`;
+          })
+          .join(", ");
 
         const insertQuery = `INSERT INTO ${this.tableName} (${columnList}) VALUES ${values}`;
         await this.conn.query(insertQuery);
@@ -452,18 +453,7 @@ export class DuckDBDataProcessor {
       if (value instanceof Date) {
         schema[key] = "TIMESTAMP";
       } else if (typeof value === "number") {
-        // Check if it's an ID column (common naming patterns for IDs)
-        const isIdColumn = 
-          key.toLowerCase().includes('id') ||
-          key.toLowerCase() === 'uprn' ||
-          key.toLowerCase().includes('identifier');
-
-        // Use VARCHAR for IDs, number types for other numeric values
-        if (isIdColumn) {
-          schema[key] = "VARCHAR";
-        } else {
-          schema[key] = Number.isInteger(value) ? "INTEGER" : "DOUBLE";
-        }
+        schema[key] = Number.isInteger(value) ? "INTEGER" : "DOUBLE";
       } else if (typeof value === "boolean") {
         schema[key] = "BOOLEAN";
       } else {
@@ -519,6 +509,18 @@ export class DuckDBDataProcessor {
     return result.toArray();
   }
 
+  async close() {
+    if (this.conn) {
+      await this.conn.close();
+    }
+  }
+
+  async terminate() {
+    if (this.duckdb) {
+      await this.duckdb.terminate();
+    }
+  }
+
   async dropTable() {
     if (this.conn) {
       await this.conn.query(`DROP TABLE IF EXISTS ${this.tableName}`);
@@ -529,20 +531,20 @@ export class DuckDBDataProcessor {
     try {
       const escapedColumn = this.safeColumnName(column);
       const escapedGroupBy = groupBy ? this.safeColumnName(groupBy) : null;
-      
+
       let query;
       if (escapedGroupBy) {
         query = `
           SELECT ${escapedGroupBy} as group_key, ${aggregation}(${escapedColumn}) as aggregate_value
-          FROM ${this.tableName}
+        FROM ${this.tableName}
           GROUP BY ${escapedGroupBy}
-          ORDER BY aggregate_value DESC
-        `;
+        ORDER BY aggregate_value DESC
+      `;
       } else {
         query = `
           SELECT ${aggregation}(${escapedColumn}) as aggregate_value
-          FROM ${this.tableName}
-        `;
+        FROM ${this.tableName}
+      `;
       }
 
       const result = await this.conn.query(query);
@@ -636,16 +638,15 @@ export class DuckDBDataProcessor {
   async applyFilter(filterConditions) {
     try {
       // Process filter conditions to ensure safe column names
-      const processedConditions = filterConditions.map(condition => {
+      const processedConditions = filterConditions.map((condition) => {
         const { column, operator, value } = condition;
         const escapedColumn = this.safeColumnName(column);
-        const escapedValue = typeof value === 'string' 
-          ? `'${value.replace(/'/g, "''")}'` 
-          : value;
+        const escapedValue =
+          typeof value === "string" ? `'${value.replace(/'/g, "''")}'` : value;
         return `${escapedColumn} ${operator} ${escapedValue}`;
       });
 
-      const whereClause = processedConditions.join(' AND ');
+      const whereClause = processedConditions.join(" AND ");
       const query = `
         SELECT *, ROWID
         FROM ${this.tableName}
@@ -655,7 +656,7 @@ export class DuckDBDataProcessor {
 
       return await this.conn.query(query);
     } catch (error) {
-      console.error('Filter query failed:', error);
+      console.error("Filter query failed:", error);
       throw error;
     }
   }
@@ -663,11 +664,13 @@ export class DuckDBDataProcessor {
   async applySorting(sortColumns) {
     try {
       // Process sort columns to ensure safe column names
-      const orderByClause = sortColumns.map(sort => {
-        const { column, direction } = sort;
-        const escapedColumn = this.safeColumnName(column);
-        return `${escapedColumn} ${direction || 'ASC'}`;
-      }).join(', ');
+      const orderByClause = sortColumns
+        .map((sort) => {
+          const { column, direction } = sort;
+          const escapedColumn = this.safeColumnName(column);
+          return `${escapedColumn} ${direction || "ASC"}`;
+        })
+        .join(", ");
 
       const query = `
         SELECT *, ROWID
@@ -678,7 +681,7 @@ export class DuckDBDataProcessor {
 
       return await this.conn.query(query);
     } catch (error) {
-      console.error('Sort query failed:', error);
+      console.error("Sort query failed:", error);
       throw error;
     }
   }
@@ -709,7 +712,7 @@ export class DuckDBDataProcessor {
 
       return await this.conn.query(query);
     } catch (error) {
-      console.error('Distribution query failed:', error);
+      console.error("Distribution query failed:", error);
       throw error;
     }
   }
