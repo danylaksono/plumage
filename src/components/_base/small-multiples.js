@@ -22,6 +22,13 @@ export class BaseSmallMultiples extends BaseVisualization {
     this.charts = [];
     this.selectedData = [];
     this.update = this.update.bind(this);
+
+    console.log("[SmallMultiples] Initializing with config:", {
+      columns: config.columns,
+      chartWidth: config.chartWidth,
+      chartHeight: config.chartHeight,
+      ChartClass: config.ChartClass?.name,
+    });
   }
 
   async initialize() {
@@ -36,14 +43,29 @@ export class BaseSmallMultiples extends BaseVisualization {
       this.config;
 
     if (!columns || columns.length === 0) {
-      console.warn("No columns specified for small multiples.");
+      console.warn(
+        "[SmallMultiples] No columns specified for small multiples."
+      );
       return;
     }
+
+    console.log("[SmallMultiples] Creating charts layout:", {
+      numColumns: columns.length,
+      chartWidth,
+      chartHeight,
+      containerWidth: this.config.width,
+    });
 
     const containerWidth = this.config.width;
     const effectiveWidth = chartWidth + gap.horizontal;
     const chartsPerRow = Math.floor(containerWidth / effectiveWidth);
     const numRows = Math.ceil(columns.length / chartsPerRow);
+
+    console.log("[SmallMultiples] Layout calculated:", {
+      chartsPerRow,
+      numRows,
+      effectiveWidth,
+    });
 
     this.charts = [];
 
@@ -54,6 +76,15 @@ export class BaseSmallMultiples extends BaseVisualization {
 
       const xOffset = col * (chartWidth + gap.horizontal);
       const yOffset = row * (chartHeight + gap.vertical);
+
+      console.log(
+        `[SmallMultiples] Creating chart ${i + 1}/${columns.length}:`,
+        {
+          column,
+          position: { row, col },
+          offset: { x: xOffset, y: yOffset },
+        }
+      );
 
       const chartConfig = new ChartConfig({
         column: column,
@@ -104,10 +135,20 @@ export class BaseSmallMultiples extends BaseVisualization {
       await chart.update();
 
       this.charts.push(chart);
+
+      console.log(
+        `[SmallMultiples] Chart ${i + 1} initialized for column:`,
+        column
+      );
     }
   }
 
   setupLinkedInteractivity() {
+    console.log(
+      "[SmallMultiples] Setting up linked interactivity for",
+      this.charts.length,
+      "charts"
+    );
     const self = this;
 
     this.charts.forEach((chart) => {
@@ -130,7 +171,9 @@ export class BaseSmallMultiples extends BaseVisualization {
   }
 
   async update() {
+    console.log("[SmallMultiples] Starting update");
     await this.initialize();
+    console.log("[SmallMultiples] Update complete");
   }
 
   async updateOtherCharts(sourceChart) {
