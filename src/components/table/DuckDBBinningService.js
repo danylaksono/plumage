@@ -9,11 +9,12 @@ export class DuckDBBinningService {
   }
 
   async checkConnection() {
-    if (!this.duckdb) {
+    if (!this.duckdb || !this.duckdb.conn) {
       throw new Error("DuckDB processor is not initialized");
     }
     try {
-      await this.duckdb.waitForConnection();
+      // Ensure the connection is active
+      await this.duckdb.conn.query("SELECT 1");
     } catch (error) {
       throw new Error(`DuckDB connection failed: ${error.message}`);
     }

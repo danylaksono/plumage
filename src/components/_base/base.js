@@ -186,4 +186,50 @@ export class BaseVisualization {
     getSelectedData: async () => {},
     on: (event, callback) => {},
   };
+
+  static isLargeNumber(value) {
+    // Check if the value is a BigInt
+    if (typeof value === 'bigint') return true;
+    
+    // Check if the value is a number larger than MAX_SAFE_INTEGER
+    if (typeof value === 'number' && !Number.isSafeInteger(value)) return true;
+    
+    // Check if the value is a string representation of a large number
+    if (typeof value === 'string') {
+      const num = Number(value);
+      if (!Number.isSafeInteger(num)) return true;
+    }
+    
+    return false;
+  }
+
+  static getSafeType(value) {
+    if (value instanceof Date) return "TIMESTAMP";
+    if (BaseVisualization.isLargeNumber(value)) return "VARCHAR";
+    if (typeof value === "number") {
+      return Number.isInteger(value) ? "INTEGER" : "DOUBLE";
+    }
+    if (typeof value === "boolean") return "BOOLEAN";
+    return "VARCHAR";
+  }
+
+  async validateData(data) {
+    if (!Array.isArray(data)) {
+      throw new Error("Data must be an array");
+    }
+    
+    const firstValidRow = data.find(row => row !== null && Object.keys(row).length > 0);
+    if (!firstValidRow) {
+      throw new Error("No valid data rows found");
+    }
+
+    // Log data sample for debugging
+    console.log("Data sample:", {
+      first: firstValidRow,
+      sampleSize: Math.min(data.length, 5),
+      totalRows: data.length
+    });
+
+    return true;
+  }
 }

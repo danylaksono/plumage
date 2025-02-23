@@ -9,6 +9,7 @@ export class Histogram extends BaseVisualization {
       binThreshold: null,
       maxOrdinalBins: 20,
       showLabelsBelow: false,
+      unique: false, // New property to handle unique columns
     };
 
     super({ ...histogramDefaults, ...config });
@@ -92,19 +93,42 @@ export class Histogram extends BaseVisualization {
   }
 
   async processDataWithDuckDB() {
-    const { column } = this.config;
+    const { column, unique } = this.config;
     this.type = await this.dataProcessor.getTypeFromDuckDB(column);
-    this.bins = await this.dataProcessor.binDataWithDuckDB(
-      column,
-      this.type,
-      this.config.maxOrdinalBins
-    );
+
+    if (unique) {
+      // For unique columns, create a single bin with total count
+      const countQuery = `SELECT COUNT(*) as count FROM ${this.tableName}`;
+      const result = await this.dataProcessor.query(countQuery);
+      const totalCount = Number(result[0].count);
+
+      this.bins = [
+        {
+          x0: "Unique",
+          x1: "Unique",
+          key: "Unique",
+          length: totalCount,
+        },
+      ];
+    } else {
+      this.bins = await this.dataProcessor.binDataWithDuckDB(
+        column,
+        this.type,
+        this.config.maxOrdinalBins
+      );
+    }
+
+    // Log bins for debugging
+    console.log(`Bins for column ${column} (type: ${this.type}):`, this.bins);
 
     this.xScale = this.createXScale();
     this.yScale = this.createYScale();
 
-    console.log("Histogram: xScale domain:", this.xScale.domain());
-    console.log("Histogram: yScale domain:", this.yScale.domain());
+    console.log("Histogram scales:", {
+      xDomain: this.xScale.domain(),
+      yDomain: this.yScale.domain(),
+      isUnique: unique,
+    });
   }
 
   // Keep all your existing methods below, but remove duplicate methods
@@ -291,8 +315,13 @@ export class Histogram extends BaseVisualization {
     const {
       type,
       bins,
-      config: { width },
+      config: { width, unique },
     } = this;
+
+    if (unique) {
+      // For unique columns, use the full width
+      return d3.scaleBand().domain(["Unique"]).range([0, width]).padding(0.1);
+    }
 
     if (type === "ordinal") {
       return d3
@@ -336,12 +365,37 @@ export class Histogram extends BaseVisualization {
     const {
       xScale,
       yScale,
-      config: { height },
+      config: { height, unique },
       bins,
     } = this;
 
+    // Log bins for debugging
+    console.log("Drawing bars with bins:", bins);
+
     // Remove existing bars
     this.g.selectAll(".bar").remove();
+
+    if (unique) {
+      // Draw a single full-width bar for unique columns
+      this.g
+        .selectAll(".bar")
+        .data(bins)
+        .enter()
+        .append("rect")
+        .attr("class", "bar")
+        .attr("x", 0)
+        .attr("y", 0)
+        .attr("width", xScale.bandwidth())
+        .attr("height", height)
+        .attr("fill", this.config.colors[0])
+        .attr("stroke", "white")
+        .attr("stroke-width", "1")
+        .on("mouseover", (event, d) => this.handleMouseOver(event, d))
+        .on("mouseout", (event, d) => this.handleMouseOut(event, d))
+        .on("click", (event, d) => this.handleClick(event, d));
+
+      return;
+    }
 
     // If we have highlighted data, draw the original data in grey first
     if (this.highlightedData) {
@@ -500,6 +554,16 @@ export class Histogram extends BaseVisualization {
   }
 
   handleMouseOver(event, d) {
+    if (this.config.unique) {
+      // Special tooltip for unique columns
+      this.tooltip
+        .style("opacity", 1)
+        .html(`Unique Values: ${d.length}`)
+        .style("left", `${event.pageX}px`)
+        .style("top", `${event.pageY + 10}px`);
+      return;
+    }
+
     if (this.config.showLabelsBelow) {
       // Hide tooltip when showing labels
       this.tooltip.style("opacity", 0);
@@ -803,5 +867,9 @@ export class Histogram extends BaseVisualization {
       .style("pointer-events", "all");
 
     brushGroup.call(this.brush);
+  }
+
+  getNode() {
+    return this.svg.node();
   }
 }

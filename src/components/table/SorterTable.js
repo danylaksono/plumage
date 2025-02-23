@@ -1,72 +1,118 @@
 import * as d3 from "npm:d3";
+import { BaseVisualization } from "../_base/base.js";
 import { ColumnManager } from "./ColumnManager.js";
 import { TableRenderer } from "./TableRenderer.js";
 import { SortController } from "./SortController.js";
 import { ColShiftController } from "./ColShiftController.js";
-import { HistogramController } from "./HistogramController.js";
-import { BinningService } from "./BinningService.js";
-import { FilterService } from "./FilterService.js"; // Import FilterService
-import { DuckDBDataProcessor } from "../_base/duckdb-processor.js"; // Add this import
+import { Histogram } from "../charts/histogram.js";
+import { FilterService } from "./FilterService.js";
+import { DuckDBDataProcessor } from "../_base/duckdb-processor.js";
+import { DuckDBBinningService } from "./DuckDBBinningService.js";
 
 export class SorterTable {
   constructor(data, columnNames, changed, options = {}) {
     if (new.target) {
-      // This ensures proper async initialization when using 'new'
       return (async () => {
-        this.changed = changed;
-        this.options = {
-          containerHeight: options.height || "400px",
-          containerWidth: options.width || "100%",
-          rowsPerPage: options.rowsPerPage || 50,
-          loadMoreThreshold: options.loadMoreThreshold || 100,
-        };
+        try {
+          this.changed = changed;
+          this.options = {
+            containerHeight: options.height || "400px",
+            containerWidth: options.width || "100%",
+            rowsPerPage: options.rowsPerPage || 50,
+            loadMoreThreshold: options.loadMoreThreshold || 100,
+            maxOrdinalBins: options.maxOrdinalBins || 20,
+            continuousBinMethod:
+              options.continuousBinMethod || "freedmanDiaconis",
+            retryAttempts: options.retryAttempts || 3,
+            retryDelay: options.retryDelay || 1000,
+          };
 
-        // Normalize column definitions upfront
-        this.normalizedColumns = this.normalizeColumnDefinitions(columnNames);
+          // Normalize column definitions upfront
+          this.normalizedColumns = this.normalizeColumnDefinitions(columnNames);
 
-        // Create table element first
-        this.table = this.createTableElement();
+          // Create table element first
+          this.table = this.createTableElement();
 
-        this.duckDBTableName = "main_table";
-        this.duckDBProcessor = new DuckDBDataProcessor(
-          null,
-          this.duckDBTableName
-        );
-        this.data = null;
-        this.binningService = new BinningService();
-        this.filterService = null; // Will be initialized after DuckDB setup
-        this.initialColumns = null;
-        this._isUndoing = false;
-        this.dataInd = [];
-        this.sortControllers = [];
-        this.visControllers = [];
-        this.compoundSorting = {};
-        this.selected = [];
-        this.selectedColumn = null;
-        this.history = [];
-        this.ctrlDown = false;
-        this.shiftDown = false;
-        this.lastRowSelected = 0;
-        this.defaultLines = 1000;
-        this.lastLineAdded = 0;
-        this.additionalLines = 500;
-        this.addingRows = false;
-        this.rules = [];
-        this.selectedRows = new Set();
-        this.percentiles = [
-          0, 0.01, 0.02, 0.03, 0.04, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7,
-          0.8, 0.9, 0.95, 0.96, 0.97, 0.98, 0.99, 1,
-        ];
+          // Initialize DuckDB components with retry logic
+          this.duckDBTableName = "main_table";
+          this.duckDBProcessor = new DuckDBDataProcessor(
+            null,
+            this.duckDBTableName
+          );
 
-        this.showDefaultControls =
-          options.showDefaultControls !== undefined
-            ? options.showDefaultControls
-            : true;
+          let attempts = 0;
+          while (attempts < this.options.retryAttempts) {
+            try {
+              await this.duckDBProcessor.connect();
+              this.binningService = new DuckDBBinningService(
+                this.duckDBProcessor
+              );
+              break;
+            } catch (error) {
+              attempts++;
+              if (attempts >= this.options.retryAttempts) {
+                throw new Error(
+                  `Failed to initialize DuckDB after ${attempts} attempts: ${error.message}`
+                );
+              }
+              console.warn(
+                `DuckDB initialization attempt ${attempts} failed, retrying...`
+              );
+              await new Promise((resolve) =>
+                setTimeout(resolve, this.options.retryDelay)
+              );
+            }
+          }
 
-        // Await the initialization
-        await this.initializeTable(data, this.normalizedColumns, options);
+          // Initialize state variables
+          this.data = null;
+          this.filterService = null;
+          this.initialColumns = null;
+          this._isUndoing = false;
+          this.dataInd = [];
+          this.sortControllers = [];
+          this.visControllers = [];
+          this.compoundSorting = {};
+          this.selected = [];
+          this.selectedColumn = null;
+          this.history = [];
+          this.ctrlDown = false;
+          this.shiftDown = false;
+          this.lastRowSelected = 0;
+          this.defaultLines = 1000;
+          this.lastLineAdded = 0;
+          this.additionalLines = 500;
+          this.addingRows = false;
+          this.rules = [];
+          this.selectedRows = new Set();
+          this.percentiles = [
+            0, 0.01, 0.02, 0.03, 0.04, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7,
+            0.8, 0.9, 0.95, 0.96, 0.97, 0.98, 0.99, 1,
+          ];
 
-        return this;
+          this.showDefaultControls =
+            options.showDefaultControls !== undefined
+              ? options.showDefaultControls
+              : true;
+
+          // Initialize the table with error reporting
+          try {
+            await this.initializeTable(data, this.normalizedColumns, options);
+          } catch (error) {
+            console.error("Table initialization failed:", error);
+            // Clean up resources before re-throwing
+            await this.destroy();
+            throw error;
+          }
+
+          return this;
+        } catch (error) {
+          // Ensure cleanup on initialization failure
+          if (this.duckDBProcessor) {
+            await this.duckDBProcessor.cleanup().catch(console.error);
+          }
+          throw error;
+        }
       })();
     }
     throw new Error("SorterTable must be instantiated with new");
@@ -89,43 +135,12 @@ export class SorterTable {
     try {
       // Initialize DuckDB first
       await this.duckDBProcessor.connect();
+      await this.duckDBProcessor.loadData(data, this.detectDataFormat(data));
 
       // Initialize FilterService with DuckDB processor
       this.filterService = new FilterService(this.duckDBProcessor);
 
-      // Load data first
-      await this.duckDBProcessor.loadData(data, this.detectDataFormat(data));
-
-      // Process column definitions and get types from DuckDB
-      const columnTypes = await Promise.all(
-        columnDefinitions.map(async (colDef) => {
-          const colName = typeof colDef === "string" ? colDef : colDef.column;
-          const type = await this.duckDBProcessor.getTypeFromDuckDB(colName);
-
-          // Get initial data sample for binning
-          const sampleQuery = `SELECT "${colName}" FROM ${this.duckDBTableName} LIMIT 1000`;
-          const sampleData = await this.duckDBProcessor.query(sampleQuery);
-
-          // Initialize bins using binningService for non-unique columns
-          let binData = [];
-          if (!colDef.unique && type === "continuous") {
-            binData = await this.binningService.binData(
-              sampleData,
-              colName,
-              type,
-              options.maxOrdinalBins || 20
-            );
-          }
-
-          return {
-            ...(typeof colDef === "string" ? { column: colDef } : colDef),
-            type: colDef.type || type,
-            bins: binData,
-          };
-        })
-      );
-
-      // Get initial data
+      // Get initial data sample
       this.data = await this.duckDBProcessor.query(
         `SELECT * FROM ${this.duckDBTableName} LIMIT ${this.options.rowsPerPage}`
       );
@@ -134,22 +149,32 @@ export class SorterTable {
         throw new Error("No data loaded from DuckDB");
       }
 
-      // Initialize rest of the table
-      this.dataInd = d3.range(this.data.length);
-      this.columnManager = new ColumnManager(
-        columnTypes,
-        this.data,
-        this.binningService,
-        options.maxOrdinalBins,
-        options.continuousBinMethod
+      // Process column definitions and get types from DuckDB
+      const columnTypes = await Promise.all(
+        columnDefinitions.map(async (colDef) => {
+          const colName = typeof colDef === "string" ? colDef : colDef.column;
+          // Let DuckDB infer the type
+          const type = await this.duckDBProcessor.getTypeFromDuckDB(colName);
+
+          return {
+            ...(typeof colDef === "string" ? { column: colDef } : colDef),
+            type: colDef.type || type,
+          };
+        })
       );
+
+      // Initialize dataInd for initial data
+      this.dataInd = d3.range(this.data.length);
+
+      // Initialize column manager with processed column definitions
+      this.columnManager = new ColumnManager(columnTypes);
 
       // Store initial column state
       this.initialColumns = JSON.parse(
         JSON.stringify(this.columnManager.columns)
       );
 
-      // Initialize table renderer and visualizations
+      // Initialize table renderer
       this.tableRenderer = new TableRenderer(
         this.columnManager.columns,
         this.data,
@@ -160,6 +185,7 @@ export class SorterTable {
       );
       this.tableRenderer.setTable(this.table);
 
+      // Initialize histograms and other visualizations
       await this.initializeVisualizations();
 
       // Create initial table structure
@@ -172,50 +198,280 @@ export class SorterTable {
   }
 
   async initializeVisualizations() {
-    // Initialize visualization controllers for each column
     this.visControllers = await Promise.all(
       this.columnManager.columns.map(async (col) => {
-        if (col.unique) {
+        console.log(`Initializing visualization for column: ${col.column}`, {
+          type: col.type,
+          unique: col.unique,
+        });
+
+        try {
+          // Get binning data with validation
+          const rawBinningData = await this.binningService.getBinningForColumn(
+            col.column,
+            col.type,
+            this.options.maxOrdinalBins
+          );
+
+          const validatedBinningData = this.validateBinningData(
+            rawBinningData,
+            col.column,
+            col.type
+          );
+
+          // Configuration common to all histograms
+          const baseConfig = {
+            column: col.column,
+            height: 60,
+            width: 150,
+            colors: ["steelblue", "orange"],
+            dataProcessor: this.duckDBProcessor,
+            tableName: this.duckDBTableName,
+            showLabelsBelow: true,
+            axis: false,
+            initialData: validatedBinningData,
+          };
+
+          // Special handling for unique columns
+          if (col.unique) {
+            const histogram = new Histogram({
+              ...baseConfig,
+              selectionMode: "click",
+              unique: true,
+            });
+
+            await histogram.initialize();
+            console.log(`Unique column histogram initialized: ${col.column}`);
+
+            histogram.on("selectionChanged", (selectedData) => {
+              console.log(
+                `Selection changed for unique column ${col.column}:`,
+                {
+                  selectedCount: selectedData?.length || 0,
+                }
+              );
+              this.handleHistogramSelection(selectedData, col.column);
+            });
+
+            return histogram;
+          }
+
+          // Regular columns
+          const histogram = new Histogram({
+            ...baseConfig,
+            selectionMode: col.type === "continuous" ? "drag" : "click",
+            maxOrdinalBins: this.options.maxOrdinalBins || 20,
+            type: col.type,
+          });
+
+          await histogram.initialize();
+          console.log(`Regular histogram initialized: ${col.column}`, {
+            type: col.type,
+            selectionMode: col.type === "continuous" ? "drag" : "click",
+            binCount: validatedBinningData.bins.length,
+          });
+
+          histogram.on("selectionChanged", (selectedData) => {
+            console.log(`Selection changed for column ${col.column}:`, {
+              selectedCount: selectedData?.length || 0,
+              type: col.type,
+            });
+            this.handleHistogramSelection(selectedData, col.column);
+          });
+
+          return histogram;
+        } catch (error) {
+          console.error(
+            `Failed to initialize histogram for column ${col.column}:`,
+            error
+          );
+          // Return null for failed histograms, they will be filtered out later
           return null;
         }
+      })
+    );
 
-        // Create visualization controller with proper options
-        const controller = new HistogramController([], {
-          type: col.type,
-          thresholds: col.type === "continuous" ? 20 : undefined,
-          maxOrdinalBins: this.options.maxOrdinalBins,
-          brushable: col.type === "continuous", // Enable brushing for continuous data
-          onBrush: (range) => this.updateSelection(range, col.column), // Add brush callback
+    // Filter out failed histograms
+    this.visControllers = this.visControllers.filter(
+      (controller) => controller !== null
+    );
+
+    // Log final initialization state
+    console.log("Visualizations initialization complete:", {
+      total: this.columnManager.columns.length,
+      successful: this.visControllers.length,
+      columns: this.columnManager.columns.map((c) => ({
+        column: c.column,
+        type: c.type,
+        unique: c.unique,
+        hasController: this.visControllers.some(
+          (vc) => vc && vc.config.column === c.column
+        ),
+      })),
+    });
+  }
+
+  async handleHistogramSelection(selectedData, sourceColumn) {
+    if (!this.ctrlDown) {
+      this.clearSelection();
+    }
+
+    if (!selectedData || selectedData.length === 0) {
+      this.selectionUpdated();
+      return;
+    }
+
+    try {
+      const columnDef = this.columnManager.columns.find(
+        (c) => c.column === sourceColumn
+      );
+      if (!columnDef) return;
+
+      let whereClause;
+      if (columnDef.type === "continuous" && selectedData.x0 !== undefined) {
+        // Handle range selection for continuous data
+        whereClause = `${this.duckDBProcessor.safeColumnName(
+          sourceColumn
+        )} >= ${selectedData.x0} AND ${this.duckDBProcessor.safeColumnName(
+          sourceColumn
+        )} <= ${selectedData.x1}`;
+      } else {
+        // Handle discrete selections (ordinal/unique)
+        const values = Array.isArray(selectedData)
+          ? selectedData
+          : [selectedData];
+        const formattedValues = values.map((value) => {
+          const val = value[sourceColumn];
+          if (typeof val === "string") {
+            return `'${val.replace(/'/g, "''")}'`;
+          }
+          if (val instanceof Date) {
+            return `'${val.toISOString()}'`;
+          }
+          return val;
         });
+        whereClause = `${this.duckDBProcessor.safeColumnName(
+          sourceColumn
+        )} IN (${formattedValues.join(",")})`;
+      }
 
-        // Link controller to table and set column name
-        controller.table = this;
-        controller.columnName = col.column;
+      // Query DuckDB for matching rows
+      const query = `
+        SELECT ROWID
+        FROM ${this.duckDBTableName}
+        WHERE ${whereClause}
+        LIMIT ${this.options.rowsPerPage}
+      `;
 
-        // Get binned data from DuckDB
-        const binData = await this.duckDBProcessor.binDataWithDuckDB(
-          col.column,
-          col.type,
-          this.options.maxOrdinalBins || 20
-        );
+      console.log("Executing selection query:", {
+        column: sourceColumn,
+        type: columnDef.type,
+        query,
+      });
 
-        // Set initial data with binning info
-        const visData = await this.getVisualizationData(col.column, binData);
-        await controller.initialize(visData, {
-          type: col.type,
-          bins: binData,
-        });
+      const result = await this.duckDBProcessor.query(query);
+      const matchingIndices = result.map((row) => row.rowid);
 
-        return controller;
+      // Update table selection
+      Array.from(this.tableRenderer.tBody.children).forEach((tr, idx) => {
+        if (matchingIndices.includes(idx)) {
+          this.selectRow(tr);
+        }
+      });
+
+      // Update other histograms with the new selection
+      await this.updateOtherHistograms(sourceColumn);
+      this.selectionUpdated();
+    } catch (error) {
+      console.error("Error in histogram selection:", error, {
+        selectedData,
+        sourceColumn,
+      });
+    }
+  }
+
+  async updateOtherHistograms(sourceColumn) {
+    await Promise.all(
+      this.visControllers.map(async (histogram, idx) => {
+        if (
+          histogram &&
+          this.columnManager.columns[idx].column !== sourceColumn
+        ) {
+          const selectedIndices = Array.from(this.selectedRows);
+          if (selectedIndices.length > 0) {
+            await histogram.highlightData(selectedIndices);
+          } else {
+            histogram.highlightedData = null;
+            histogram.drawBars();
+          }
+        }
       })
     );
   }
 
-  async getVisualizationData(columnName, binData) {
-    // Get raw column data
-    const query = `SELECT "${columnName}" FROM ${this.duckDBTableName}`;
-    const result = await this.duckDBProcessor.query(query);
-    return result.map((row) => row[columnName]);
+  async destroyVisualizations() {
+    await Promise.all(
+      this.visControllers.map(async (histogram) => {
+        if (histogram && histogram.destroy) {
+          await histogram.destroy();
+        }
+      })
+    );
+    this.visControllers = [];
+  }
+
+  async destroy() {
+    try {
+      // First destroy all visualizations
+      await Promise.all(
+        this.visControllers.map(async (histogram) => {
+          try {
+            if (histogram && histogram.destroy) {
+              await histogram.destroy();
+            }
+          } catch (error) {
+            console.error("Error destroying histogram:", error);
+          }
+        })
+      );
+      this.visControllers = [];
+
+      // Clean up DuckDB resources
+      try {
+        if (this.duckDBProcessor) {
+          // Close any active queries first
+          await this.duckDBProcessor.cleanup();
+        }
+      } catch (error) {
+        console.error("Error cleaning up DuckDB processor:", error);
+      }
+
+      // Clear binning service
+      this.binningService = null;
+
+      // Clear all references and state
+      this.duckDBProcessor = null;
+      this.filterService = null;
+      this.data = null;
+      this.dataInd = [];
+      this.selectedRows.clear();
+      this.compoundSorting = {};
+      this.history = [];
+      this.sortControllers = [];
+
+      // Remove DOM elements
+      if (this.table) {
+        this.table.innerHTML = "";
+      }
+      if (this.tableRenderer) {
+        this.tableRenderer.tBody = null;
+        this.tableRenderer.tHead = null;
+        this.tableRenderer = null;
+      }
+    } catch (error) {
+      console.error("Error during cleanup:", error);
+      throw error;
+    }
   }
 
   detectDataFormat(data) {
@@ -643,16 +899,14 @@ export class SorterTable {
     }
 
     this.sortControllers = [];
-    this.visControllers = [];
-
     this.tableRenderer.tHead = document.createElement("thead");
     this.table.appendChild(this.tableRenderer.tHead);
 
-    // --- Column Header Row ---
+    // Column Header Row
     let headerRow = document.createElement("tr");
     this.tableRenderer.tHead.append(headerRow);
 
-    this.columnManager.columns.forEach((c) => {
+    this.columnManager.columns.forEach((c, idx) => {
       let th = document.createElement("th");
       headerRow.appendChild(th);
       Object.assign(th.style, {
@@ -662,7 +916,7 @@ export class SorterTable {
         background: "#f8f9fa",
       });
 
-      // --- Column Name ---
+      // Column Name
       let nameSpan = document.createElement("span");
       nameSpan.innerText = c.alias || c.column;
       Object.assign(nameSpan.style, {
@@ -677,58 +931,16 @@ export class SorterTable {
         transition: "background-color 0.2s",
       });
 
-      // Add long press event listener
-      let longPressTimer;
-      let isLongPress = false;
-      nameSpan.addEventListener("mousedown", (event) => {
-        // Check if the left mouse button was pressed
-        if (event.button === 0) {
-          isLongPress = false; // Reset long press flag
-          longPressTimer = setTimeout(() => {
-            isLongPress = true;
-            this.selectColumn(c.column); // Select the column
-          }, 500); // Adjust the timeout (in milliseconds) as needed
-        }
-      });
-
-      nameSpan.addEventListener("mouseup", () => {
-        clearTimeout(longPressTimer);
-      });
-
-      // Prevent context menu on long press
-      nameSpan.addEventListener("contextmenu", (event) => {
-        event.preventDefault();
-      });
-
-      nameSpan.addEventListener("click", () => {
-        if (!isLongPress) {
-          const sortCtrl = this.sortControllers.find(
-            (ctrl) => ctrl.getColumn() === c.column
-          );
-          if (sortCtrl) {
-            sortCtrl.toggleDirection();
-            this.sortChanged(sortCtrl);
-          }
-        }
-      });
-
-      nameSpan.addEventListener("mouseover", () => {
-        nameSpan.style.backgroundColor = "#edf2f7";
-      });
-      nameSpan.addEventListener("mouseout", () => {
-        nameSpan.style.backgroundColor = "transparent";
-      });
-
+      // Add column click handlers
+      this.setupColumnClickHandlers(nameSpan, c);
       th.appendChild(nameSpan);
 
-      // --- Controls Row ---
+      // Controls Row (Sort and Shift)
       let controlsRow = document.createElement("tr");
-      th.appendChild(controlsRow); // Append controls row to the header cell (th)
-
+      th.appendChild(controlsRow);
       let controlsTd = document.createElement("td");
       controlsRow.appendChild(controlsTd);
 
-      // Create a container for controls
       let controlsContainer = document.createElement("div");
       Object.assign(controlsContainer.style, {
         display: "flex",
@@ -740,87 +952,41 @@ export class SorterTable {
       });
       controlsTd.appendChild(controlsContainer);
 
-      // Shift controller cell
+      // Add shift controller
       const shiftCtrl = new ColShiftController(
         c.column,
         (columnName, direction) => this.shiftCol(columnName, direction)
       );
       controlsContainer.appendChild(shiftCtrl.getNode());
 
-      // Sort controller cell
+      // Add sort controller
       let sortCtrl = new SortController(c.column, (controller) =>
         this.sortChanged(controller)
       );
       this.sortControllers.push(sortCtrl);
       controlsContainer.appendChild(sortCtrl.getNode());
 
-      // --- Visualization Row ---
+      // Visualization Row
       let visRow = document.createElement("tr");
-      th.appendChild(visRow); // Append visualization row to the header cell (th)
-
+      th.appendChild(visRow);
       let visTd = document.createElement("td");
       visRow.appendChild(visTd);
 
-      if (c.unique) {
-        // For unique columns, create a histogram with a single bin
-        let uniqueData = this.dataInd.map((i) => this.data[i][c.column]);
-        const uniqueBinning = [
-          { x0: "Unique", x1: "Unique", values: uniqueData },
-        ];
-        let visCtrl = new HistogramController(uniqueData, { unique: true });
-        visCtrl.table = this;
-        visCtrl.columnName = c.column;
-        this.visControllers.push(visCtrl);
-        visTd.appendChild(visCtrl.getNode());
-      } else {
-        // Create and initialize histogram for non-unique columns
-        const columnData = this.dataInd.map((i) => this.data[i][c.column]);
-
-        // Get binning configuration based on column type
-        const binConfig = async () => {
-          if (c.type === "continuous") {
-            const bins = await this.binningService.binData(
-              this.data,
-              c.column,
-              "continuous"
-            );
-            return {
-              type: "continuous",
-              thresholds: bins.length,
-              binInfo: bins,
-            };
-          } else {
-            return {
-              type: "ordinal",
-              nominals: Array.from(new Set(columnData)),
-            };
-          }
-        };
-
-        // Create histogram controller with proper configuration
-        binConfig().then((config) => {
-          let visCtrl = new HistogramController(columnData, config);
-          visCtrl.table = this;
-          visCtrl.columnName = c.column;
-          this.visControllers.push(visCtrl);
-          visTd.appendChild(visCtrl.getNode());
-
-          // Debug log
-          console.log("Created histogram for column:", {
-            column: c.column,
-            type: c.type,
-            binConfig: config,
-            dataLength: columnData.length,
-          });
-        });
+      // Add histogram visualization
+      const histogram = this.visControllers[idx];
+      if (histogram) {
+        const visContainer = document.createElement("div");
+        visContainer.style.padding = "4px";
+        visContainer.appendChild(histogram.getNode());
+        visTd.appendChild(visContainer);
       }
     });
 
     // Add sticky positioning to thead
     this.tableRenderer.tHead.style.position = "sticky";
     this.tableRenderer.tHead.style.top = "0";
-    this.tableRenderer.tHead.style.backgroundColor = "#ffffff"; // Ensure header is opaque
-    this.tableRenderer.tHead.style.zIndex = "1"; // Keep header above table content
+    this.tableRenderer.tHead.style.backgroundColor = "#ffffff";
+    this.tableRenderer.tHead.style.zIndex = "1";
     this.tableRenderer.tHead.style.boxShadow = "0 2px 2px rgba(0,0,0,0.1)";
   }
 
@@ -991,9 +1157,9 @@ export class SorterTable {
   }
 
   resetHistogramSelections() {
-    this.visControllers.forEach((vc) => {
-      if (vc instanceof HistogramController) {
-        vc.resetSelection();
+    this.visControllers.forEach((histogram) => {
+      if (histogram) {
+        histogram.clearSelection();
       }
     });
   }
@@ -1009,8 +1175,6 @@ export class SorterTable {
 
       // Get safe column name from DuckDB processor
       const escapedColumn = this.duckDBProcessor.safeColumnName(colName);
-
-      // Handle BigInt columns by casting to DOUBLE in the ORDER BY clause
       const orderByClause = `CAST(${escapedColumn} AS DOUBLE) ${sortDirection}`;
 
       // First get total count for pagination info
@@ -1018,7 +1182,7 @@ export class SorterTable {
       const countResult = await this.duckDBProcessor.query(countQuery);
       const totalRows = countResult[0].total;
 
-      // Get sorted data with all necessary columns for visualization
+      // Get sorted data with row numbers
       const query = `
         WITH sorted_data AS (
           SELECT *, ROW_NUMBER() OVER (ORDER BY ${orderByClause}) as sort_order
@@ -1030,8 +1194,6 @@ export class SorterTable {
       `;
 
       const sortedResult = await this.duckDBProcessor.query(query);
-
-      // Update data with sorted results
       this.data = sortedResult;
       this.dataInd = sortedResult.map((row, idx) => idx);
 
@@ -1041,44 +1203,28 @@ export class SorterTable {
         order: Object.keys(this.compoundSorting).length,
       };
 
-      // Update each visualization controller with properly processed data
+      // Update visualizations with sorted data
       for (let i = 0; i < this.visControllers.length; i++) {
-        const vc = this.visControllers[i];
-        if (!vc) continue;
+        const histogram = this.visControllers[i];
+        if (!histogram) continue;
 
         const columnName = this.columnManager.columns[i].column;
         const columnType = this.columnManager.columns[i].type;
 
-        try {
-          // Get binned data for the column using DuckDB
-          const binData = await this.duckDBProcessor.binDataWithDuckDB(
-            columnName,
-            columnType,
-            this.options.maxOrdinalBins || 20
-          );
+        // Get new binning data using DuckDBBinningService
+        const binningData = await this.binningService.getBinningForColumn(
+          columnName,
+          columnType,
+          this.options.maxOrdinalBins
+        );
 
-          // Prepare visualization data
-          const visData = {
-            type: columnType,
-            bins: binData || [], // Ensure bins is at least an empty array
-            ...(columnType === "ordinal" && {
-              nominals:
-                binData?.map((bin) => bin.key).filter((k) => k !== undefined) ||
-                [],
-            }),
-          };
+        // Update histogram with new binning data
+        await histogram.update(binningData);
 
-          // Check if visualization controller has setData method before calling
-          if (vc && typeof vc.setData === "function") {
-            vc.setData(visData);
-          }
-        } catch (error) {
-          console.warn(
-            `Failed to update visualization for column ${columnName}:`,
-            error
-          );
-          // Continue with other visualizations even if one fails
-          continue;
+        // If there are selections, update highlights
+        if (this.selectedRows.size > 0) {
+          const selectedIndices = Array.from(this.selectedRows);
+          await histogram.highlightData(selectedIndices);
         }
       }
 
@@ -1422,31 +1568,35 @@ export class SorterTable {
     );
     if (!columnDef || columnDef.type !== "continuous") return;
 
-    console.log("Processing brush selection:", {
-      range,
-      columnName: sourceColumn,
-    });
+    // Build DuckDB query for range selection
+    const safeColumn = this.duckDBProcessor.safeColumnName(sourceColumn);
+    const whereClause = `${safeColumn} >= ${range[0]} AND ${safeColumn} <= ${range[1]}`;
+    const query = `
+      SELECT ROWID
+      FROM ${this.duckDBTableName}
+      WHERE ${whereClause}
+      LIMIT ${this.options.rowsPerPage}
+    `;
 
-    // Select rows within the brushed range
-    let selectedCount = 0;
-    Array.from(this.tableRenderer.tBody.children).forEach((tr, idx) => {
-      const rowValue = this.data[idx][sourceColumn];
-      if (rowValue != null && typeof rowValue === "number") {
-        if (rowValue >= range[0] && rowValue <= range[1]) {
-          this.selectRow(tr);
-          selectedCount++;
-        }
-      }
-    });
+    // Execute query and update selection
+    this.duckDBProcessor
+      .query(query)
+      .then((result) => {
+        const selectedIndices = result.map((row) => row.rowid);
+        selectedIndices.forEach((idx) => {
+          const tr = this.tableRenderer.tBody.children[idx];
+          if (tr) {
+            this.selectRow(tr);
+          }
+        });
 
-    console.log("Brush selection complete:", {
-      totalSelected: selectedCount,
-      selectedRows: Array.from(this.selectedRows),
-    });
-
-    // Update other histograms
-    this.updateOtherHistograms(sourceColumn);
-    this.selectionUpdated();
+        // Update other histograms with selection
+        this.updateOtherHistograms(sourceColumn);
+        this.selectionUpdated();
+      })
+      .catch((error) => {
+        console.error("Error in brush selection:", error);
+      });
   }
 
   // Update the updateSelection method to handle both discrete and continuous selections
@@ -1505,5 +1655,93 @@ export class SorterTable {
   clearSelection() {
     this.selectedRows.clear();
     this.tableRenderer.updateSelection([]);
+  }
+
+  setupColumnClickHandlers(nameSpan, columnDef) {
+    // Long press timer and state
+    let longPressTimer;
+    let isLongPress = false;
+
+    nameSpan.addEventListener("mousedown", (event) => {
+      if (event.button === 0) {
+        isLongPress = false;
+        longPressTimer = setTimeout(() => {
+          isLongPress = true;
+          this.selectColumn(columnDef.column);
+        }, 500);
+      }
+    });
+
+    nameSpan.addEventListener("mouseup", () => {
+      clearTimeout(longPressTimer);
+    });
+
+    // Prevent context menu on long press
+    nameSpan.addEventListener("contextmenu", (event) => {
+      event.preventDefault();
+    });
+
+    // Handle click (not long press) for sorting
+    nameSpan.addEventListener("click", () => {
+      if (!isLongPress) {
+        const sortCtrl = this.sortControllers.find(
+          (ctrl) => ctrl.getColumn() === columnDef.column
+        );
+        if (sortCtrl) {
+          sortCtrl.toggleDirection();
+          this.sortChanged(sortCtrl);
+        }
+      }
+    });
+
+    // Visual feedback
+    nameSpan.addEventListener("mouseover", () => {
+      nameSpan.style.backgroundColor = "#edf2f7";
+    });
+    nameSpan.addEventListener("mouseout", () => {
+      nameSpan.style.backgroundColor = "transparent";
+    });
+  }
+
+  validateBinningData(binningData, columnName, columnType) {
+    if (!binningData || !Array.isArray(binningData.bins)) {
+      console.warn(`Invalid binning data for column ${columnName}`);
+      // Return a safe default structure
+      return {
+        type: columnType || "ordinal",
+        bins: [],
+        nominals: [],
+      };
+    }
+
+    // Validate individual bins
+    const validatedBins = binningData.bins.map((bin) => {
+      // Ensure required properties exist
+      const validBin = {
+        x0: bin.x0 ?? null,
+        x1: bin.x1 ?? null,
+        length: typeof bin.length === "number" ? bin.length : 0,
+        count: typeof bin.count === "number" ? bin.count : 0,
+      };
+
+      // Add type-specific properties
+      if (columnType === "ordinal") {
+        validBin.key = bin.key ?? bin.x0 ?? "unknown";
+      }
+
+      // Add optional statistics if they exist
+      if (typeof bin.mean === "number") validBin.mean = bin.mean;
+      if (typeof bin.median === "number") validBin.median = bin.median;
+      if (typeof bin.min === "number") validBin.min = bin.min;
+      if (typeof bin.max === "number") validBin.max = bin.max;
+
+      return validBin;
+    });
+
+    return {
+      type: binningData.type || columnType || "ordinal",
+      bins: validatedBins,
+      nominals: Array.isArray(binningData.nominals) ? binningData.nominals : [],
+    };
   }
 }
