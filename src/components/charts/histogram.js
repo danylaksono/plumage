@@ -482,8 +482,21 @@ export class Histogram extends BaseVisualization {
     }
 
     // For continuous/date data, calculate width from scales
-    const width = Math.max(1, this.xScale(b.x1) - this.xScale(b.x0));
-    return isNaN(width) ? 0 : width;
+    // let width = this.xScale(b.x1) - this.xScale(b.x0);
+    // if (isNaN(width) || width <= 0) {
+    //   return 0;
+    // }
+    // return width;
+    const domain = this.xScale.domain();
+    const x0 = Math.max(domain[0], b.x0);
+    const x1 = Math.min(domain[1], b.x1);
+
+    let width = this.xScale(x1) - this.xScale(x0);
+
+    if (isNaN(width) || width <= 0) {
+      return 0;
+    }
+    return width;
   }
 
   handleMouseOver(event, d) {
