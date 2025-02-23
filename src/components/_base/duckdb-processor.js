@@ -177,64 +177,154 @@ export class DuckDBDataProcessor {
 
     switch (type) {
       case "continuous":
-        // First get the column type to handle casting properly
-        const typeQuery = `SELECT typeof(${column}) as col_type
-                          FROM ${this.tableName}
-                          WHERE ${column} IS NOT NULL
-                          LIMIT 1`;
+        // Query the column type to ensure proper casting.
+        const typeQuery = `
+          SELECT typeof(${column}) as col_type
+          FROM ${this.tableName}
+          WHERE ${column} IS NOT NULL
+          LIMIT 1
+        `;
         const typeResult = await this.logQuery(typeQuery, "Get Column Type");
-        // const colType = typeResult.toArray()[0].col_type;
-        // const numericType = this.getDuckDBType(colType);\
-        const typeArray = typeResult.toArray(); // Get the array of results
-        const colType = typeArray.length > 0 ? typeArray[0].col_type : null; // Check if there are results
+        const typeArray = typeResult.toArray();
+        const colType = typeArray.length > 0 ? typeArray[0].col_type : null;
 
-        // Handle null colType
+        // If there are no non-null values, fall back to ordinal binning.
         if (!colType) {
           console.warn(
             `Column ${column} has no non-null values, defaulting to ordinal type.`
           );
-          // If there are no non-null values, default to ordinal type
           return this.binDataWithDuckDB(column, "ordinal", maxOrdinalBins);
         }
 
+        // Map the column type to a DuckDB numeric type.
         const numericType = this.getDuckDBType(colType);
 
+        const rangeQuery = `
+          SELECT 
+            MIN(${column}) as min_val,
+            PERCENTILE_CONT(0.01) WITHIN GROUP (ORDER BY ${column}) as p01_val,
+            PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY ${column}) as p99_val,
+            MAX(${column}) as max_val,
+            COUNT(*) as total_count
+          FROM ${this.tableName}
+          WHERE ${column} IS NOT NULL AND ${column} > 0
+        `;
+        const rangeResult = await this.logQuery(rangeQuery, "Get Range");
+        const range = rangeResult.toArray()[0];
+
+        if (!range.min_val || !range.p99_val) {
+          console.warn(
+            `Column ${column} has no positive values, falling back to regular binning.`
+          );
+          return this.binDataWithDuckDB(column, "ordinal", maxOrdinalBins);
+        }
+
+        // Calculate Quartiles and IQR for positive values
+        const quartilesQuery = `
+          SELECT 
+            PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY ${column}) as q1,
+            PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY ${column}) as q3
+          FROM ${this.tableName}
+          WHERE ${column} IS NOT NULL AND ${column} > 0
+        `;
+        const quartilesResult = await this.logQuery(
+          quartilesQuery,
+          "Get Quartiles for IQR"
+        );
+        const quartiles = quartilesResult.toArray()[0];
+        const q1 = quartiles.q1;
+        const q3 = quartiles.q3;
+        const iqr = q3 - q1;
+        const upperFence = q3 + 1.5 * iqr;
+
+        // Determine mainUpperBound using the IQR method
+        const mainUpperBound = Math.min(upperFence, range.max_val);
+        const mainLowerBound = range.p01_val || range.min_val;
+
+        const outlierCapMultiplier = 1.2;
+        const outlierCap = Math.min(
+          range.max_val,
+          mainUpperBound * outlierCapMultiplier
+        );
+
+        // The following query constructs bins using several common table expressions (CTEs):
+        // 1. main_data: Selects values between mainLowerBound and mainUpperBound.
+        // 2. bin_bounds: Computes logarithmic spacing parameters for 10 bins over the main range.
+        // 3. bin_edges: Generates logarithmically spaced edges.
+        // 4. numbered_edges: Numbers the edges sequentially.
+        // 5. bins: Aggregates the counts for each main bin.
+        // 6. underliers: Captures data below mainLowerBound.
+        // 7. outliers: Captures data above mainUpperBound.
+        // The final SELECT unions these results and orders them by x0.
         query = `
-          WITH stats AS (
-            SELECT
-              MIN(${column}) as min_val,
-              MAX(${column}) as max_val,
-              COUNT(*) as n,
-              (MAX(${column}) - MIN(${column})) as range
+          WITH main_data AS (
+            SELECT ${column}
             FROM ${this.tableName}
-            WHERE ${column} IS NOT NULL
+            WHERE ${column} IS NOT NULL 
+              AND ${column} >= ${mainLowerBound}
+              AND ${column} <= ${mainUpperBound}
           ),
-          bin_params AS (
+          bin_bounds AS (
             SELECT
-              min_val,
-              max_val,
-              (max_val - min_val) / 10.0 as bin_width
-            FROM stats
+              ${mainLowerBound} as min_val,
+              ${mainUpperBound} as max_val,
+              (LN(${mainUpperBound}) - LN(${mainLowerBound})) / 10.0 as log_width
+          ),
+          bin_edges AS (
+            SELECT 
+              EXP(LN(min_val) + (value * log_width)) as edge
+            FROM bin_bounds, generate_series(0, 10) as g(value)
+          ),
+          numbered_edges AS (
+            SELECT 
+              edge,
+              ROW_NUMBER() OVER (ORDER BY edge) as rn
+            FROM bin_edges
           ),
           bins AS (
+            SELECT 
+              e1.edge as x0,
+              e2.edge as x1,
+              COUNT(d.${column}) as length
+            FROM numbered_edges e1
+            JOIN numbered_edges e2 ON e2.rn = e1.rn + 1
+            LEFT JOIN main_data d
+              ON d.${column} >= e1.edge 
+              AND d.${column} < e2.edge
+            GROUP BY e1.edge, e2.edge, e1.rn
+            HAVING e1.edge < e2.edge
+          ),
+          underliers AS (
             SELECT
-              min_val + (CAST(value - 1 AS ${colType}) * bin_width) as x0,
-              min_val + (CAST(value AS ${colType}) * bin_width) as x1
-            FROM generate_series(1, 10) vals(value), bin_params
+              'lower' as type,
+              ${range.min_val} as x0,
+              ${mainLowerBound} as x1,
+              COUNT(*) as length
+            FROM ${this.tableName}
+            WHERE ${column} < ${mainLowerBound}
+            HAVING COUNT(*) > 0
+          ),
+          outliers AS (
+            SELECT
+              'upper' as type,
+              ${mainUpperBound} as x0,
+              ${outlierCap} as x1,
+              COUNT(*) as length
+            FROM ${this.tableName}
+            WHERE ${column} > ${mainUpperBound}
+            HAVING COUNT(*) > 0
           )
-          SELECT
-            x0,
-            x1,
-            COUNT(${column}) as length
-          FROM ${this.tableName}
-          CROSS JOIN bins
-          WHERE ${column} >= x0 AND ${column} < x1
-          GROUP BY x0, x1
+          SELECT x0, x1, length FROM bins
+          UNION ALL
+          SELECT x0, x1, length FROM underliers
+          UNION ALL
+          SELECT x0, x1, length FROM outliers
           ORDER BY x0
         `;
         break;
 
       case "date":
+        // For date columns, group data by day.
         query = `
           SELECT
             date_trunc('day', ${column}) as x0,
@@ -248,6 +338,7 @@ export class DuckDBDataProcessor {
         break;
 
       case "ordinal":
+        // For ordinal data, group by distinct values and limit to maxOrdinalBins.
         query = `
           SELECT
             ${column} as key,
@@ -263,15 +354,19 @@ export class DuckDBDataProcessor {
         break;
     }
 
-    // console.log("DuckDB Query:", query);
+    // Execute the constructed query.
     const result = await this.conn.query(query);
-    // console.log("DuckDB Result:", result);
     let bins = result.toArray().map((row) => ({
       ...row,
+      // Convert date strings to Date objects when binning dates.
       x0: type === "date" ? new Date(row.x0) : row.x0,
       x1: type === "date" ? new Date(row.x1) : row.x1,
     }));
 
+    console.log(">>> Bins for data:", column, bins);
+
+    // For ordinal data, if the maximum distinct bins are reached,
+    // compute an additional "Other" bin for remaining categories.
     if (type === "ordinal" && bins.length === maxOrdinalBins) {
       const othersQuery = `
         WITH ranked AS (
@@ -285,7 +380,6 @@ export class DuckDBDataProcessor {
         SELECT SUM(cnt) as length
         FROM ranked
       `;
-
       const othersResult = await this.conn.query(othersQuery);
       const othersCount = othersResult.toArray()[0].length;
 
@@ -300,6 +394,22 @@ export class DuckDBDataProcessor {
     }
 
     return bins;
+  }
+
+  async getQuartiles(column) {
+    const query = `
+      SELECT 
+        MIN(${column}) as min_val,
+        PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY ${column}) as q1,
+        PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY ${column}) as median,
+        PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY ${column}) as q3,
+        MAX(${column}) as max_val
+      FROM ${this.tableName}
+      WHERE ${column} IS NOT NULL
+    `;
+
+    const result = await this.logQuery(query, "Calculate Quartiles");
+    return result.toArray()[0];
   }
 
   async loadData(source, format) {
