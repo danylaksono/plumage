@@ -1,6 +1,25 @@
 import { DuckDBDataProcessor } from "./duckdb-processor.js";
 import * as d3 from "npm:d3";
 
+export class ChartConfig {
+  constructor(config = {}) {
+    const defaults = {
+      width: 600,
+      height: 400,
+      margin: { top: 20, right: 20, bottom: 40, left: 40 },
+      colors: ["steelblue", "orange"],
+      selectionMode: "single", // 'single', 'multiple', 'drag'
+      axis: true,
+      dataSource: null,
+      dataFormat: null,
+      column: null, // for single-column charts
+      columns: [], // for multi-column charts
+    };
+
+    return { ...defaults, ...config };
+  }
+}
+
 export class BaseVisualization {
   constructor(config) {
     const defaults = {
@@ -95,4 +114,17 @@ export class BaseVisualization {
     }
     this.initialized = false;
   }
+
+  /**
+   * Interface that all chart types must implement
+   */
+  static chartInterface = {
+    initialize: async () => {},
+    update: async (data) => {},
+    destroy: async () => {},
+    highlightData: async (indices) => {},
+    highlightDataByValue: async (values) => {},
+    getSelectedData: async () => {},
+    on: (event, callback) => {},
+  };
 }
