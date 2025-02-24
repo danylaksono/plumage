@@ -145,6 +145,8 @@ export class SorterTable {
         `SELECT * FROM ${this.duckDBTableName} LIMIT ${this.options.rowsPerPage}`
       );
 
+      console.log("Raw data sample:", this.data);
+
       if (!this.data || this.data.length === 0) {
         throw new Error("No data loaded from DuckDB");
       }
@@ -213,11 +215,15 @@ export class SorterTable {
             this.options.maxOrdinalBins
           );
 
+          console.log("Raw binning data:", rawBinningData);
+
           const validatedBinningData = this.validateBinningData(
             rawBinningData,
             col.column,
             col.type
           );
+
+          console.log("Validated binning data:", validatedBinningData);
 
           // Configuration common to all histograms
           const baseConfig = {
@@ -493,6 +499,7 @@ export class SorterTable {
       fontFamily: "Arial, sans-serif",
       fontSize: "14px",
       userSelect: "none",
+      margin: "0 0",
     });
     return table;
   }
@@ -976,7 +983,7 @@ export class SorterTable {
       const histogram = this.visControllers[idx];
       if (histogram) {
         const visContainer = document.createElement("div");
-        visContainer.style.padding = "4px";
+        visContainer.style.padding = "2px";
         visContainer.appendChild(histogram.getNode());
         visTd.appendChild(visContainer);
       }

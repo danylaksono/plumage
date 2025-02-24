@@ -95,6 +95,8 @@ export class DuckDBBinningService {
       maxBins
     );
 
+    console.log(`Raw ordinal result for ${columnName}:`, result);
+
     return {
       type: "ordinal",
       bins: result.map((bin) => ({

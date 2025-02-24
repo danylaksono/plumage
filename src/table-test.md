@@ -1,40 +1,57 @@
-# Histogram
+# Table Test
 
 ```js
-import { Histogram } from "./components/charts/histogram.js";
+import { SorterTable } from "./components/table/index.js";
+```
+
+<style>
+    #table {
+        border-collapse: collapse;
+        width: 100%;
+        margin-top: 0px;
+    }
+</style>
+
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.2.0/css/all.min.css" />
+
+```js
+const columns = [
+  { column: "age" },
+  { column: "category" },
+  { column: "income", type: "continuous" },
+  { column: "score", type: "continuous" },
+  { column: "city", type: "ordinal" },
+];
+
+// Initialize and display table
+const initializeTable = async () => {
+  try {
+    // Create new table instance with explicit options
+    const myTable = await new SorterTable(data, columns, myChangeCallback, {
+      height: "500px",
+      width: "100%",
+      rowsPerPage: 50,
+      maxOrdinalBins: 10, // Limit ordinal categories
+      continuousBinMethod: "sturges", // Use Sturges' formula for continuous bins
+    });
+    // Return the table node for display
+    return myTable.getNode();
+  } catch (error) {
+    console.error("Failed to initialize table:", error);
+    throw error; // Propagate error for better debugging
+  }
+};
+
+// Call the initialization function
+const tableElement = await initializeTable();
+display(tableElement);
 ```
 
 ```js
-// Example usage
-const histogram = new Histogram({
-  width: 210,
-  height: 210,
-  column: "income",
-  // yColumn: "income",
-  colors: ["steelblue", "orange"],
-  selectionMode: "drag",
-  dataSource: data,
-  showLabelsBelow: true,
-  axis: false,
-  dataFormat: "json", // or "csv" or "parquet"
-});
-
-// Initialize and draw
-await histogram.initialize();
-await histogram.update();
-
-await histogram.highlightData([1, 2, 3, 5, 7]);
-// await histogram.highlightDataByValue([30000, 40000, 78000]);
-
-display(histogram.svg.node());
-```
-
-```js
-// Listen for selection changes
-histogram.on("selectionChanged", (selectedData) => {
-  console.log("Selected points:", selectedData);
-  display(selectedData);
-});
+// Example callback function
+const myChangeCallback = (event) => {
+  console.log("Table changed:", event);
+};
 ```
 
 ```js

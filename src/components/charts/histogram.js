@@ -870,6 +870,7 @@ export class Histogram extends BaseVisualization {
   }
 
   getNode() {
+    console.log("Returning SVG node:", this.svg.node());
     return this.svg.node();
   }
 }
