@@ -177,34 +177,32 @@ export class DuckDBDataProcessor {
    * For continuous data, creates equal-width bins between 5th and 95th percentiles.
    */
   async binDataWithDuckDB(column, type, maxOrdinalBins = 20) {
+    const escapedColumn = this.safeColumnName(column);
     let query;
-
     switch (type) {
       case "continuous":
         // Get column type for proper casting
-        const typeQuery = `SELECT typeof(${column}) as col_type
+        const typeQuery = `SELECT typeof(${escapedColumn}) as col_type
                         FROM ${this.tableName}
-                        WHERE ${column} IS NOT NULL
+                        WHERE ${escapedColumn} IS NOT NULL
                         LIMIT 1`;
         const typeResult = await this.logQuery(typeQuery, "Get Column Type");
         const typeArray = typeResult.toArray();
         const colType = typeArray.length > 0 ? typeArray[0].col_type : null;
-
         if (!colType) {
           console.warn(
-            `Column ${column} has no non-null values, defaulting to ordinal type.`
+            `Column ${escapedColumn} has no non-null values, defaulting to ordinal type.`
           );
           return this.binDataWithDuckDB(column, "ordinal", maxOrdinalBins);
         }
-
         // Create 10 equal-width bins between 5th and 95th percentiles
         query = `
         WITH stats AS (
           SELECT 
-            PERCENTILE_CONT(0.05) WITHIN GROUP (ORDER BY ${column}) as p05,
-            PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY ${column}) as p95
+            PERCENTILE_CONT(0.05) WITHIN GROUP (ORDER BY ${escapedColumn}) as p05,
+            PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY ${escapedColumn}) as p95
           FROM ${this.tableName}
-          WHERE ${column} IS NOT NULL
+          WHERE ${escapedColumn} IS NOT NULL
         ),
         numbers AS (
           SELECT unnest(generate_series(0, 10))::DOUBLE as bin_number
@@ -223,51 +221,58 @@ export class DuckDBDataProcessor {
           COUNT(*) as length
         FROM ${this.tableName}
         CROSS JOIN bin_edges
-        WHERE ${column} IS NOT NULL
-          AND ${column} >= p05 
-          AND ${column} <= p95
-          AND ${column} >= CAST(p05 + (bin_number * bin_width) AS DOUBLE)
-          AND ${column} < CAST(p05 + ((bin_number + 1.0) * bin_width) AS DOUBLE)
+        WHERE ${escapedColumn} IS NOT NULL
+          AND ${escapedColumn} >= p05 
+          AND ${escapedColumn} <= p95
+          AND ${escapedColumn} >= CAST(p05 + (bin_number * bin_width) AS DOUBLE)
+          AND ${escapedColumn} < CAST(p05 + ((bin_number + 1.0) * bin_width) AS DOUBLE)
         GROUP BY bin_number, p05, bin_width
         ORDER BY x0;
       `;
         break;
-
       case "date":
         query = `
         SELECT
-          date_trunc('day', ${column}) as x0,
-          date_trunc('day', ${column}) + INTERVAL '1 day' as x1,
+          date_trunc('day', ${escapedColumn}) as x0,
+          date_trunc('day', ${escapedColumn}) + INTERVAL '1 day' as x1,
           COUNT(*) as length
         FROM ${this.tableName}
-        WHERE ${column} IS NOT NULL
-        GROUP BY date_trunc('day', ${column})
+        WHERE ${escapedColumn} IS NOT NULL
+        GROUP BY date_trunc('day', ${escapedColumn})
         ORDER BY x0
       `;
         break;
-
       case "ordinal":
         query = `
         SELECT
-          ${column} as key,
-          ${column} as x0,
-          ${column} as x1,
+          ${escapedColumn} as key,
+          ${escapedColumn} as x0,
+          ${escapedColumn} as x1,
           COUNT(*) as length
         FROM ${this.tableName}
-        WHERE ${column} IS NOT NULL
-        GROUP BY ${column}
+        WHERE ${escapedColumn} IS NOT NULL
+        GROUP BY ${escapedColumn}
         ORDER BY length DESC
         LIMIT ${maxOrdinalBins}
       `;
         break;
     }
 
+    console.log("Executing binning query:", {
+      column,
+      type,
+      query,
+    });
+
     const result = await this.conn.query(query);
-    return result.toArray().map((row) => ({
+    const binned = result.toArray().map((row) => ({
       ...row,
       x0: type === "date" ? new Date(row.x0) : row.x0,
       x1: type === "date" ? new Date(row.x1) : row.x1,
     }));
+
+    console.log("Binning result:", binned);
+    return binned;
   }
 
   async getQuartiles(column) {

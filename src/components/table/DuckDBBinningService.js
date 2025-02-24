@@ -24,30 +24,78 @@ export class DuckDBBinningService {
     if (!columnName || !this.duckdb) {
       throw new Error("Column name and DuckDB processor are required");
     }
-
     try {
       await this.checkConnection();
-
       // If type isn't provided, infer it
       if (!type) {
         type = await this.duckdb.getTypeFromDuckDB(columnName);
       }
-
       console.log(`Creating bins for ${columnName}:`, {
         type,
         maxBins,
         tableName: this.duckdb.tableName,
       });
 
+      // Get binning data from DuckDB
+      const result = await this.duckdb.binDataWithDuckDB(
+        columnName,
+        type,
+        maxBins
+      );
+      console.log(`Raw binning data for ${columnName}:`, result);
+
+      // Transform the data based on type
       switch (type) {
         case "continuous":
-          return await this.getContinuousBins(columnName, maxBins);
+          return {
+            type: "continuous",
+            bins: result.map((bin) => ({
+              x0: Number(bin.x0),
+              x1: Number(bin.x1),
+              length: Number(bin.length),
+              count: Number(bin.length),
+            })),
+            nominals: [],
+          };
+
         case "ordinal":
-          return await this.getOrdinalBins(columnName, maxBins);
+          return {
+            type: "ordinal",
+            bins: result.map((bin) => ({
+              key: bin.key,
+              x0: bin.x0,
+              x1: bin.x1,
+              length: Number(bin.length),
+              count: Number(bin.length),
+            })),
+            nominals: result.map((bin) => bin.key),
+          };
+
         case "date":
-          return await this.getDateBins(columnName, maxBins);
+          return {
+            type: "date",
+            bins: result.map((bin) => ({
+              x0: new Date(bin.x0),
+              x1: new Date(bin.x1),
+              length: Number(bin.length),
+              count: Number(bin.length),
+              key: new Date(bin.x0),
+            })),
+            nominals: [],
+          };
+
         default:
-          return await this.getOrdinalBins(columnName, maxBins);
+          return {
+            type: "ordinal",
+            bins: result.map((bin) => ({
+              key: bin.key || bin.x0,
+              x0: bin.x0,
+              x1: bin.x1,
+              length: Number(bin.length),
+              count: Number(bin.length),
+            })),
+            nominals: result.map((bin) => bin.key || bin.x0),
+          };
       }
     } catch (error) {
       console.error(`Binning failed for column ${columnName}:`, error);

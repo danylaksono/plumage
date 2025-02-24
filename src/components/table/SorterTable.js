@@ -217,10 +217,23 @@ export class SorterTable {
 
           console.log("Raw binning data:", rawBinningData);
 
+          // Map DuckDB types to histogram types
+          let histogramType = "ordinal"; // default
+          if (
+            col.type === "continuous" ||
+            col.type === "numeric" ||
+            col.type === "DOUBLE" ||
+            col.type === "INTEGER"
+          ) {
+            histogramType = "continuous";
+          } else if (col.type === "date" || col.type === "TIMESTAMP") {
+            histogramType = "date";
+          }
+
           const validatedBinningData = this.validateBinningData(
             rawBinningData,
             col.column,
-            col.type
+            histogramType
           );
 
           console.log("Validated binning data:", validatedBinningData);
@@ -236,6 +249,7 @@ export class SorterTable {
             showLabelsBelow: true,
             axis: false,
             initialData: validatedBinningData,
+            type: histogramType,
           };
 
           // Special handling for unique columns
@@ -265,15 +279,14 @@ export class SorterTable {
           // Regular columns
           const histogram = new Histogram({
             ...baseConfig,
-            selectionMode: col.type === "continuous" ? "drag" : "click",
+            selectionMode: histogramType === "continuous" ? "drag" : "click",
             maxOrdinalBins: this.options.maxOrdinalBins || 20,
-            type: col.type,
           });
 
           await histogram.initialize();
           console.log(`Regular histogram initialized: ${col.column}`, {
-            type: col.type,
-            selectionMode: col.type === "continuous" ? "drag" : "click",
+            type: histogramType,
+            selectionMode: histogramType === "continuous" ? "drag" : "click",
             binCount: validatedBinningData.bins.length,
           });
 
@@ -1713,7 +1726,6 @@ export class SorterTable {
   validateBinningData(binningData, columnName, columnType) {
     if (!binningData || !Array.isArray(binningData.bins)) {
       console.warn(`Invalid binning data for column ${columnName}`);
-      // Return a safe default structure
       return {
         type: columnType || "ordinal",
         bins: [],
@@ -1721,34 +1733,123 @@ export class SorterTable {
       };
     }
 
-    // Validate individual bins
+    // Keep original type if available, otherwise use columnType
+    const type = binningData.type || columnType || "ordinal";
+
+    // Convert BigInts to regular numbers and ensure all required properties
     const validatedBins = binningData.bins.map((bin) => {
-      // Ensure required properties exist
-      const validBin = {
-        x0: bin.x0 ?? null,
-        x1: bin.x1 ?? null,
-        length: typeof bin.length === "number" ? bin.length : 0,
-        count: typeof bin.count === "number" ? bin.count : 0,
+      // Ensure all required properties exist
+      const validatedBin = {
+        key: bin.key || bin.x0, // Use x0 as fallback for key
+        x0: bin.x0,
+        x1: bin.x1,
+        length: this.convertToNumber(bin.length),
+        count: this.convertToNumber(bin.count || bin.length), // Use length as fallback for count
       };
 
-      // Add type-specific properties
-      if (columnType === "ordinal") {
-        validBin.key = bin.key ?? bin.x0 ?? "unknown";
+      // Handle date types
+      if (type === "date") {
+        validatedBin.x0 = new Date(bin.x0);
+        validatedBin.x1 = new Date(bin.x1);
+        validatedBin.key = new Date(bin.key || bin.x0);
       }
 
-      // Add optional statistics if they exist
-      if (typeof bin.mean === "number") validBin.mean = bin.mean;
-      if (typeof bin.median === "number") validBin.median = bin.median;
-      if (typeof bin.min === "number") validBin.min = bin.min;
-      if (typeof bin.max === "number") validBin.max = bin.max;
+      // Handle continuous types
+      if (type === "continuous") {
+        validatedBin.x0 = Number(bin.x0);
+        validatedBin.x1 = Number(bin.x1);
+      }
 
-      return validBin;
+      return validatedBin;
+    });
+
+    console.log(`Validated binning data for ${columnName}:`, {
+      type,
+      binsCount: validatedBins.length,
+      sampleBin: validatedBins[0],
     });
 
     return {
-      type: binningData.type || columnType || "ordinal",
+      type,
       bins: validatedBins,
       nominals: Array.isArray(binningData.nominals) ? binningData.nominals : [],
     };
+  }
+
+  // Helper method to safely convert values to numbers
+  convertToNumber(value) {
+    if (typeof value === "bigint") {
+      return Number(value);
+    }
+    if (typeof value === "number") {
+      return value;
+    }
+    const parsed = Number(value);
+    return isNaN(parsed) ? 0 : parsed;
+  }
+
+  async processDataWithDuckDB(data = null) {
+    if (!this.dataProcessor || !this.columnManager.columns) {
+      throw new Error("Missing required processor or column configuration");
+    }
+
+    await Promise.all(
+      this.columnManager.columns.map(async (col) => {
+        // Get type from DuckDB if not already set
+        if (!col.type) {
+          const duckDBType = await this.dataProcessor.getTypeFromDuckDB(
+            col.column
+          );
+          // Map DuckDB types to our type system
+          if (
+            duckDBType === "DOUBLE" ||
+            duckDBType === "INTEGER" ||
+            duckDBType === "DECIMAL"
+          ) {
+            col.type = "continuous";
+          } else if (duckDBType === "TIMESTAMP" || duckDBType === "DATE") {
+            col.type = "date";
+          } else {
+            col.type = "ordinal";
+          }
+        }
+      })
+    );
+
+    // Update histograms with type information
+    await this.updateHistograms();
+  }
+
+  async updateHistograms() {
+    if (!this.visControllers) return;
+
+    await Promise.all(
+      this.visControllers.map(async (histogram, idx) => {
+        if (!histogram) return;
+
+        const col = this.columnManager.columns[idx];
+        if (!col) return;
+
+        try {
+          const binningData = await this.binningService.getBinningForColumn(
+            col.column,
+            col.type,
+            this.options.maxOrdinalBins
+          );
+
+          const validatedData = this.validateBinningData(
+            binningData,
+            col.column,
+            col.type
+          );
+          await histogram.update(validatedData);
+        } catch (error) {
+          console.error(
+            `Error updating histogram for column ${col.column}:`,
+            error
+          );
+        }
+      })
+    );
   }
 }
