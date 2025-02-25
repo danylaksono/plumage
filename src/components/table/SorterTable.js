@@ -125,20 +125,31 @@ export class SorterTable {
     const columnTypes = await Promise.all(
       columnDefinitions.map(async (colDef) => {
         const colName = colDef.column;
+
+        // For unique columns, skip type inference and binning
+        if (colDef.unique) {
+          return {
+            ...colDef,
+            type: "unique",
+            bins: [],
+          };
+        }
+
+        // For non-unique columns, proceed with type inference and binning
         const type =
           colDef.type ||
           (await this.duckDBProcessor.getTypeFromDuckDB(colName));
-        const sampleData = await this.duckDBProcessor.query(
-          `SELECT "${colName}" FROM ${this.duckDBTableName} LIMIT 1000`
-        );
-        const bins =
-          !colDef.unique && type === "continuous"
-            ? await this.binningService.getBinningForColumn(
-                colName,
-                type,
-                this.options.maxOrdinalBins || 20
-              )
-            : [];
+        let bins = [];
+
+        // Only create bins for non-unique columns that are continuous or ordinal
+        if (!colDef.unique && (type === "continuous" || type === "ordinal")) {
+          bins = await this.binningService.getBinningForColumn(
+            colName,
+            type,
+            this.options.maxOrdinalBins || 20
+          );
+        }
+
         return { ...colDef, type, bins };
       })
     );
@@ -177,54 +188,72 @@ export class SorterTable {
   async initializeVisualizations() {
     this.visControllers = await Promise.all(
       this.columnManager.columns.map(async (col) => {
-        const columnData = this.dataInd.map((i) => this.data[i][col.column]);
         let config;
 
+        // Handle unique columns - skip binning entirely
         if (col.unique) {
+          // Get the total count of rows for the unique column
+          const countQuery = `SELECT COUNT(*) as total FROM ${this.duckDBTableName}`;
+          const countResult = await this.duckDBProcessor.query(countQuery);
           config = {
             type: "unique",
-            bins: [{ x0: "Unique", x1: "Unique", values: columnData }],
+            uniqueCount: countResult[0].total,
+            columnName: col.column,
           };
-        } else if (col.type === "continuous") {
-          const bins = await this.binningService.getBinningForColumn(
-            col.column,
-            "continuous",
-            this.options.maxOrdinalBins || 20
-          );
+        } else if (
+          col.type === "continuous" ||
+          col.type === "ordinal" ||
+          col.type === "string"
+        ) {
+          try {
+            const bins = await this.binningService.getBinningForColumn(
+              col.column,
+              col.type,
+              this.options.maxOrdinalBins || 20
+            );
 
-          // Handle continuous data binning
-          config = {
-            type: "continuous",
-            thresholds: bins.length,
-            binInfo: bins,
-          };
-        } else if (col.type === "ordinal" || col.type === "string") {
-          // For ordinal/categorical data, get proper bins with category counts
-          const bins = await this.binningService.getBinningForColumn(
-            col.column,
-            col.type === "string" ? "string" : "ordinal",
-            this.options.maxOrdinalBins || 20
-          );
-
-          config = {
-            type: "ordinal",
-            bins: bins, // Pass the pre-binned data directly
-            nominals: Array.from(new Set(columnData)),
-          };
+            config = {
+              type: col.type,
+              bins: bins,
+              columnName: col.column,
+              tableName: this.duckDBTableName,
+            };
+          } catch (error) {
+            console.error(`Error getting bins for ${col.column}:`, error);
+            config = {
+              type: col.type || "ordinal",
+            };
+          }
         } else {
-          // Default fallback for other types
           config = {
-            type: "ordinal",
-            nominals: Array.from(new Set(columnData)),
+            type: col.type || "ordinal",
           };
         }
 
+        const columnData = this.dataInd.map((i) => this.data[i][col.column]);
         const controller = new HistogramController(columnData, config);
         controller.table = this;
         controller.columnName = col.column;
+        controller.duckDBProcessor = this.duckDBProcessor;
+
         return controller;
       })
     );
+  }
+
+  // Helper method to get unique count for a column
+  async getUniqueCountForColumn(column) {
+    try {
+      const uniqueQuery = `
+        SELECT COUNT(DISTINCT "${column}") as unique_count 
+        FROM ${this.duckDBTableName}
+      `;
+      const uniqueResult = await this.duckDBProcessor.query(uniqueQuery);
+      return uniqueResult[0].unique_count;
+    } catch (error) {
+      console.error(`Error getting unique count for ${column}:`, error);
+      return 0;
+    }
   }
 
   createHeader() {
@@ -497,13 +526,28 @@ export class SorterTable {
   }
 
   selectionUpdated() {
+    // Get all selected data
+    const selectedData = Array.from(this.selectedRows).map((i) => this.data[i]);
+
+    // Update each histogram visualization
     this.visControllers.forEach((vc) => {
-      const selectedData = Array.from(this.selectedRows)
-        .map((i) => this.data[i][vc.columnName])
+      // Skip updating unique columns since they don't show data distributions
+      if (vc.options.type === "unique") return;
+
+      // Extract the relevant column data from the selection
+      const selectedColumnData = selectedData
+        .map((row) => row[vc.columnName])
         .filter((v) => v != null);
-      vc.highlightedData = selectedData.length ? selectedData : null;
+
+      // If there's no selection, highlight all data
+      vc.highlightedData =
+        this.selectedRows.size > 0
+          ? selectedColumnData
+          : this.data.map((row) => row[vc.columnName]);
       vc.render();
     });
+
+    // Notify about selection change
     this.changed({
       type: "selection",
       indeces: Array.from(this.selectedRows),
@@ -555,38 +599,50 @@ export class SorterTable {
 
     // Find rows that match the selected values in the source column
     const matchingRows = [];
+    const sourceData = selectedValues;
+
+    // For continuous data, handle range selection
+    const isRange =
+      selectedValues &&
+      typeof selectedValues[0] === "object" &&
+      "min" in selectedValues[0] &&
+      "max" in selectedValues[0];
+
     for (let i = 0; i < this.data.length; i++) {
       const rowValue = this.data[i][sourceColumn];
-      if (this.isValueInSelection(rowValue, selectedValues)) {
-        matchingRows.push(i);
 
-        // Select the row in the table UI
-        const rowElement = this.tableRenderer.tBody.children[i];
-        if (rowElement) {
-          this.selectRow(rowElement);
+      if (isRange) {
+        const range = selectedValues[0];
+        if (rowValue >= range.min && rowValue <= range.max) {
+          matchingRows.push(i);
         }
+      } else if (selectedValues.includes(rowValue)) {
+        matchingRows.push(i);
       }
     }
 
-    // Update the selected rows set
-    matchingRows.forEach((idx) => this.selectedRows.add(idx));
+    // Select matching rows in the table UI
+    matchingRows.forEach((idx) => {
+      const rowElement = this.tableRenderer.tBody.children[idx];
+      if (rowElement) {
+        this.selectRow(rowElement);
+      }
+      this.selectedRows.add(idx);
+    });
 
-    // Trigger selection update to refresh all histograms
+    // Update all histogram visualizations with the selected data
+    this.visControllers.forEach((controller) => {
+      if (controller.columnName !== sourceColumn) {
+        const selectedColumnData = matchingRows.map(
+          (idx) => this.data[idx][controller.columnName]
+        );
+        controller.highlightedData = selectedColumnData;
+        controller.render();
+      }
+    });
+
+    // Notify about selection change
     this.selectionUpdated();
-  }
-
-  isValueInSelection(value, selection) {
-    if (Array.isArray(selection)) {
-      return selection.includes(value);
-    } else if (
-      typeof selection === "object" &&
-      selection.min !== undefined &&
-      selection.max !== undefined
-    ) {
-      // Handle range selection for continuous data
-      return value >= selection.min && value <= selection.max;
-    }
-    return false;
   }
 
   getNode() {

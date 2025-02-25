@@ -448,7 +448,7 @@ export class DuckDBDataProcessor {
 
       // Insert data in batches
       // const batchSize = 1000;
-      const batchSize = 10000;
+      const batchSize = 500;
       for (let i = 0; i < data.length; i += batchSize) {
         const batch = data.slice(i, i + batchSize);
         await this.insertBatch(batch, schema);
