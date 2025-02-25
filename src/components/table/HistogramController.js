@@ -24,6 +24,7 @@ export class HistogramController {
 
     this.selected = new Set();
     this.highlightedData = null;
+    this.highlightedBins = [];
     this.baseOpacity = 0.3;
     this.setupContainer();
     this.initialize(data, options);
@@ -146,17 +147,33 @@ export class HistogramController {
     const x = this.createXScale(width);
     const y = this.createYScale(height);
 
-    // Draw background histogram
+    // Draw background histogram (original data)
     this.drawHistogramBars(
       g,
       this.originalData.bins,
       x,
       y,
-      "#e0e0e0",
+      this.options.colors[1],
       this.baseOpacity
     );
 
-    // Draw highlighted bars if we have a selection
+    // Process highlighted data if available
+    if (this.highlightedData && this.highlightedData.length > 0) {
+      // Create bins for the highlighted data using the same binning parameters
+      this.highlightedBins = this.createBinsFromData(this.highlightedData);
+
+      // Draw highlighted data histogram with primary color and full opacity
+      this.drawHistogramBars(
+        g,
+        this.highlightedBins,
+        x,
+        y,
+        this.options.colors[0],
+        1.0
+      );
+    }
+
+    // Draw locally selected bins (if any) with a distinct appearance
     if (this.selected.size > 0) {
       let selectedBins;
       if (this.originalData.type === "continuous") {
@@ -170,8 +187,16 @@ export class HistogramController {
         );
       }
 
-      // Draw selected bins in primary color
-      this.drawHistogramBars(g, selectedBins, x, y, this.options.colors[0], 1);
+      // Draw selected bins with a stroke to distinguish from highlighted data
+      this.drawHistogramBars(
+        g,
+        selectedBins,
+        x,
+        y,
+        this.options.colors[0],
+        1.0,
+        true // Add stroke for selection
+      );
     }
 
     // Add interaction handlers last
@@ -216,45 +241,47 @@ export class HistogramController {
     return d3.scaleLinear().domain([0, maxCount]).range([height, 0]);
   }
 
-  drawHistogramBars(g, bins, x, y, color, opacity) {
+  drawHistogramBars(g, bins, x, y, color, opacity, isSelected = false) {
     const { height } = this.getChartDimensions();
 
     if (this.originalData.type === "continuous") {
-      g.selectAll(`.bar-${color}`)
+      g.selectAll(
+        `.bar-${color.replace("#", "")}${isSelected ? "-selected" : ""}`
+      )
         .data(bins)
         .join("rect")
-        .attr("class", `bar-${color}`)
+        .attr(
+          "class",
+          `bar-${color.replace("#", "")}${isSelected ? "-selected" : ""}`
+        )
         .attr("x", (d) => x(d.x0))
         .attr("width", (d) => Math.max(0, x(d.x1) - x(d.x0) - 1))
         .attr("y", (d) => y(d.length))
         .attr("height", (d) => height - y(d.length))
-        .attr("fill", (d) => {
-          if (this.selected.size > 0) {
-            const selectedRange = Array.from(this.selected)[0];
-            return selectedRange &&
-              d.x0 >= selectedRange.min &&
-              d.x1 <= selectedRange.max
-              ? this.options.colors[0]
-              : color;
-          }
-          return color;
-        })
+        .attr("fill", color)
         .attr("opacity", opacity)
-        .attr("rx", 2);
+        .attr("rx", 2)
+        .attr("stroke", isSelected ? "#000" : "none")
+        .attr("stroke-width", isSelected ? 1 : 0);
     } else {
-      g.selectAll(`.bar-${color}`)
+      g.selectAll(
+        `.bar-${color.replace("#", "")}${isSelected ? "-selected" : ""}`
+      )
         .data(bins)
         .join("rect")
-        .attr("class", `bar-${color}`)
+        .attr(
+          "class",
+          `bar-${color.replace("#", "")}${isSelected ? "-selected" : ""}`
+        )
         .attr("x", (d) => x(d.key))
         .attr("width", x.bandwidth())
         .attr("y", (d) => y(d.length))
         .attr("height", (d) => height - y(d.length))
-        .attr("fill", (d) =>
-          this.selected.has(d.key) ? this.options.colors[0] : color
-        )
+        .attr("fill", color)
         .attr("opacity", opacity)
-        .attr("rx", 2);
+        .attr("rx", 2)
+        .attr("stroke", isSelected ? "#000" : "none")
+        .attr("stroke-width", isSelected ? 1 : 0);
     }
   }
 

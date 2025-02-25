@@ -179,7 +179,7 @@ export class SorterTable {
       this.columnManager.columns.map(async (col) => {
         const columnData = this.dataInd.map((i) => this.data[i][col.column]);
         let config;
-        
+
         if (col.unique) {
           config = {
             type: "unique",
@@ -191,7 +191,7 @@ export class SorterTable {
             "continuous",
             this.options.maxOrdinalBins || 20
           );
-          
+
           // Handle continuous data binning
           config = {
             type: "continuous",
@@ -205,7 +205,7 @@ export class SorterTable {
             col.type === "string" ? "string" : "ordinal",
             this.options.maxOrdinalBins || 20
           );
-          
+
           config = {
             type: "ordinal",
             bins: bins, // Pass the pre-binned data directly
@@ -218,7 +218,7 @@ export class SorterTable {
             nominals: Array.from(new Set(columnData)),
           };
         }
-        
+
         const controller = new HistogramController(columnData, config);
         controller.table = this;
         controller.columnName = col.column;
@@ -547,6 +547,46 @@ export class SorterTable {
       );
     });
     this.changed({ type: "columnSelection", selectedColumn: columnName });
+  }
+
+  handleHistogramSelection(selectedValues, sourceColumn) {
+    // Clear previous selection in the table
+    this.clearSelection();
+
+    // Find rows that match the selected values in the source column
+    const matchingRows = [];
+    for (let i = 0; i < this.data.length; i++) {
+      const rowValue = this.data[i][sourceColumn];
+      if (this.isValueInSelection(rowValue, selectedValues)) {
+        matchingRows.push(i);
+
+        // Select the row in the table UI
+        const rowElement = this.tableRenderer.tBody.children[i];
+        if (rowElement) {
+          this.selectRow(rowElement);
+        }
+      }
+    }
+
+    // Update the selected rows set
+    matchingRows.forEach((idx) => this.selectedRows.add(idx));
+
+    // Trigger selection update to refresh all histograms
+    this.selectionUpdated();
+  }
+
+  isValueInSelection(value, selection) {
+    if (Array.isArray(selection)) {
+      return selection.includes(value);
+    } else if (
+      typeof selection === "object" &&
+      selection.min !== undefined &&
+      selection.max !== undefined
+    ) {
+      // Handle range selection for continuous data
+      return value >= selection.min && value <= selection.max;
+    }
+    return false;
   }
 
   getNode() {
