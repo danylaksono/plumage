@@ -7,8 +7,8 @@ import { Histogram } from "./components/charts/histogram.js";
 ```js
 // Example usage
 const histogram = new Histogram({
-  width: 210,
-  height: 210,
+  width: 610,
+  height: 610,
   column: "income",
   // yColumn: "income",
   colors: ["steelblue", "orange"],
