@@ -179,7 +179,7 @@ export class SorterTable {
       this.columnManager.columns.map(async (col) => {
         const columnData = this.dataInd.map((i) => this.data[i][col.column]);
         let config;
-
+        
         if (col.unique) {
           config = {
             type: "unique",
@@ -191,21 +191,34 @@ export class SorterTable {
             "continuous",
             this.options.maxOrdinalBins || 20
           );
-
-          // Handle bins properly based on returned structure
-          // The DuckDBBinningService now returns raw bin array for continuous data
+          
+          // Handle continuous data binning
           config = {
             type: "continuous",
             thresholds: bins.length,
             binInfo: bins,
           };
+        } else if (col.type === "ordinal" || col.type === "string") {
+          // For ordinal/categorical data, get proper bins with category counts
+          const bins = await this.binningService.getBinningForColumn(
+            col.column,
+            col.type === "string" ? "string" : "ordinal",
+            this.options.maxOrdinalBins || 20
+          );
+          
+          config = {
+            type: "ordinal",
+            bins: bins, // Pass the pre-binned data directly
+            nominals: Array.from(new Set(columnData)),
+          };
         } else {
+          // Default fallback for other types
           config = {
             type: "ordinal",
             nominals: Array.from(new Set(columnData)),
           };
         }
-
+        
         const controller = new HistogramController(columnData, config);
         controller.table = this;
         controller.columnName = col.column;

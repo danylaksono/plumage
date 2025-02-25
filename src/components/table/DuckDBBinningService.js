@@ -51,31 +51,50 @@ export class DuckDBBinningService {
       switch (type) {
         case "continuous":
           // Use the built-in binDataWithDuckDB method for continuous data
-          // Note: SorterTable.js expects the raw array of bins, not wrapped in an object
+          // Return raw bins for continuous data as SorterTable expects it
           binningData = await this.duckdb.binDataWithDuckDB(
             columnName,
             type,
             maxBins
           );
-          // Note: we're not wrapping the data in {type, bins} as SorterTable expects raw bin array
+          break;
+
+        case "ordinal":
+          // Get ordinal data categories and counts
+          const ordinalData = await this.duckdb.binDataWithDuckDB(
+            columnName,
+            type,
+            maxBins
+          );
+
+          // Process into the format expected by HistogramController
+          // Create an array of bins with values and proper structure
+          binningData = ordinalData.map((bin) => ({
+            key: bin.key,
+            x0: bin.key,
+            x1: bin.key,
+            length: Number(bin.length),
+            // Simulate the values array - needed for selection functionality
+            values: Array(Number(bin.length)).fill(bin.key),
+          }));
           break;
 
         case "date":
-        case "ordinal":
-          // Delegate to the existing binDataWithDuckDB method for these types
-          binningData = await this.duckdb.binDataWithDuckDB(
+          // Process date binning data
+          const dateData = await this.duckdb.binDataWithDuckDB(
             columnName,
             type,
             maxBins
           );
-          // Format the result to match expected structure
+
+          // Format specifically for date type
           binningData = {
-            type,
-            bins: binningData.map((row) => ({
+            type: "date",
+            bins: dateData.map((row) => ({
               x0: row.x0,
               x1: row.x1,
               length: Number(row.length),
-              ...(type === "ordinal" && { key: row.key }),
+              values: Array(Number(row.length)).fill(row.x0), // Placeholder values
             })),
           };
           break;
@@ -112,8 +131,7 @@ export class DuckDBBinningService {
     const query = `
       SELECT 
         ${escapedColumn} as key,
-        COUNT(*) as length,
-        ARRAY_AGG(${escapedColumn}) as values
+        COUNT(*) as length
       FROM ${this.duckdb.tableName}
       WHERE ${escapedColumn} IS NOT NULL
       GROUP BY ${escapedColumn}
@@ -122,17 +140,17 @@ export class DuckDBBinningService {
 
     const bins = await this.duckdb.query(query);
 
-    // Format bins for boolean type
-    return {
-      type: "boolean",
-      bins: bins.map((bin) => ({
-        key: bin.key === null ? "NULL" : bin.key.toString(),
-        x0: bin.key,
-        x1: bin.key, // For boolean, x0 and x1 are the same value
-        length: Number(bin.length),
-        values: bin.values,
-      })),
-    };
+    // Format bins for boolean type in the format expected by HistogramController
+    return bins.map((bin) => ({
+      key: bin.key === null ? "NULL" : bin.key,
+      x0: bin.key,
+      x1: bin.key, // For boolean, x0 and x1 are the same value
+      length: Number(bin.length),
+      // Create an array with the value repeated 'length' times
+      values: Array(Number(bin.length)).fill(
+        bin.key === null ? "NULL" : bin.key
+      ),
+    }));
   }
 
   async getStringBins(columnName, maxBins) {
@@ -155,33 +173,31 @@ export class DuckDBBinningService {
       other_count AS (
         SELECT 
           'Other' as key,
-          COUNT(*) as length,
-          ARRAY_AGG(${escapedColumn}) as values
+          COUNT(*) as length
         FROM ${this.duckdb.tableName}
         WHERE ${escapedColumn} IS NOT NULL
           AND ${escapedColumn} NOT IN (SELECT key FROM category_counts)
       )
-      SELECT key, length, ARRAY_AGG(${escapedColumn}) as values
+      SELECT key, length
       FROM category_counts
       UNION ALL
-      SELECT key, length, values
+      SELECT key, length
       FROM other_count
       WHERE length > 0
+      ORDER BY length DESC
     `;
 
     const bins = await this.duckdb.query(query);
 
-    // Format bins for string type
-    return {
-      type: "string",
-      bins: bins.map((bin) => ({
-        key: bin.key,
-        x0: bin.key,
-        x1: bin.key, // For string, x0 and x1 are the same value
-        length: Number(bin.length),
-        values: bin.values,
-      })),
-    };
+    // Format bins for string type in the format expected by HistogramController
+    return bins.map((bin) => ({
+      key: bin.key,
+      x0: bin.key,
+      x1: bin.key, // For string, x0 and x1 are the same value
+      length: Number(bin.length),
+      // Create an array with the value repeated 'length' times
+      values: Array(Number(bin.length)).fill(bin.key),
+    }));
   }
 
   clearCache() {

@@ -46,12 +46,18 @@ export class HistogramController {
         hasBins: Boolean(options?.bins),
       });
 
-      await this.createBins(data, {
-        type: options?.type || "ordinal",
-        thresholds: options?.thresholds,
-        preBinnedData: options?.bins, // Use pre-binned data if available
-        binInfo: options?.binInfo,
-      });
+      if (options?.bins) {
+        // If pre-binned data is provided, use it directly
+        this.originalData.bins = options.bins;
+        this.originalData.type = options.type || "ordinal";
+      } else {
+        // Otherwise create bins from raw data
+        await this.createBins(data, {
+          type: options?.type || "ordinal",
+          thresholds: options?.thresholds,
+          binInfo: options?.binInfo,
+        });
+      }
 
       // Store original data type and format
       this.dataType = options?.type || "ordinal";
