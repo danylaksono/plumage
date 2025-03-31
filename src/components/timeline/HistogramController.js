@@ -250,6 +250,7 @@ export class HistogramController {
 
     // Add interaction handlers
     if (this.originalData.type === "continuous") {
+      // Setup brush (which now includes its own background handler)
       this.setupBrush(svg, width, height);
     } else {
       this.setupOrdinalInteraction(g, x, y);
@@ -502,47 +503,42 @@ export class HistogramController {
         [0, 0],
         [width, height],
       ])
-      // Disable brush move - only allow resize
       .on("start brush", (event) => {
         // Remove tooltip during brushing
         this.hideBrushTooltip();
-        
-        if (!event.selection) return;
-        
-        // Update brush selection style
-        brushG
-          .select(".selection")
-          .attr("fill", this.options.colors[0])
-          .attr("fill-opacity", 0.15);
       })
       .on("end", (event) => {
         if (!event.selection) {
+          // Clear selection if brush is cleared
+          this.selected.clear();
           if (this.table) {
-            this.selected.clear();
             this.table.clearSelection();
-            this.render();
+            this.table.selectionUpdated();
           }
+          this.render();
           return;
         }
 
-        const scale = this.createXScale(width);
-        const [x0, x1] = event.selection.map((x) => scale.invert(x));
+        // Create x scale for converting brush coordinates to data values
+        const x = this.createXScale(width);
+        const [x0, x1] = event.selection.map(x.invert);
 
         // Store selected range
         this.selected = new Set([{ min: x0, max: x1 }]);
 
-        // Convert coordinates to data values
-        const selectedValues = this.originalData.bins
-          .filter((bin) => bin.x0 <= x1 && bin.x1 >= x0)
-          .flatMap((bin) => bin.values || [])
-          .filter((v) => v >= x0 && v <= x1);
-
         // Update visualization
         this.render();
 
-        // Notify table with selected values
-        if (this.table && selectedValues.length > 0) {
-          this.table.handleHistogramSelection([{ min: x0, max: x1 }], this.columnName);
+        // Select rows within the brushed range
+        if (this.table) {
+          const selectedRows = this.table.data.filter(row => {
+            const value = row[this.columnName];
+            return value >= x0 && value <= x1;
+          });
+
+          // Update table selection using values rather than indices
+          this.table.selectByValues(this.columnName, selectedRows.map(row => row[this.columnName]));
+          this.table.selectionUpdated();
         }
       });
 
@@ -561,14 +557,44 @@ export class HistogramController {
       .selectAll(".handle")
       .attr("fill", this.options.colors[0])
       .attr("stroke", "none")
-      .attr("width", 3)  // Make handles thinner
-      .attr("cursor", "ew-resize");  // Use horizontal resize cursor
+      .attr("width", 3)
+      .attr("cursor", "ew-resize");
 
-    // Remove overlay to prevent interference with tooltips
-    brushG.selectAll(".overlay").remove();
+    // Add background click handler to the brush container
+    brushG.on("click", (event) => {
+      if (event.target === brushG.node()) {
+        this.selected.clear();
+        if (this.table) {
+          this.table.clearSelection();
+          this.table.selectionUpdated();
+        }
+        this.render();
+      }
+    });
   }
 
   setupOrdinalInteraction(g, x, y) {
+    // First add a background rect for deselecting
+    g.append("rect")
+      .attr("class", "ordinal-background")
+      .attr("x", 0)
+      .attr("y", 0)
+      .attr("width", this.getChartDimensions().width)
+      .attr("height", this.getChartDimensions().height)
+      .attr("fill", "transparent")
+      .on("click", (event) => {
+        // Only handle direct clicks
+        if (event.target === event.currentTarget) {
+          this.selected.clear();
+          this.render();
+          
+          if (this.table) {
+            this.table.clearSelection();
+            this.table.selectionUpdated();
+          }
+        }
+      });
+
     // Create a new group for the overlay bars
     const overlayGroup = g.append("g").attr("class", "overlay-group");
 
@@ -599,25 +625,47 @@ export class HistogramController {
       .on("click", (event, d) => {
         event.stopPropagation();
 
-        // Handle selection based on ctrl/meta key
-        if (event.ctrlKey || event.metaKey) {
-          if (this.selected.has(d.key)) {
+        // Toggle selection
+        const wasSelected = this.selected.has(d.key);
+        const isCtrlPressed = event.ctrlKey || event.metaKey;
+
+        // Clear previous selection if not using ctrl/cmd
+        if (!isCtrlPressed) {
+          // If clicking the only selected bar, deselect everything
+          if (this.selected.size === 1 && wasSelected) {
+            this.selected.clear();
+          } else {
+            // Otherwise, select just this bar
+            this.selected = new Set([d.key]);
+          }
+        } else {
+          // With ctrl/cmd, toggle the clicked bar's selection
+          if (wasSelected) {
             this.selected.delete(d.key);
           } else {
             this.selected.add(d.key);
           }
-        } else {
-          // Single selection - clear previous selection
-          this.selected = new Set([d.key]);
         }
 
         // Update visualization
         this.render();
 
-        // Notify table with selection using the bin's actual values
+        // Update table selection using values
         if (this.table) {
-          const selectedValues = d.values || [d.key];
-          this.table.handleHistogramSelection(selectedValues, this.columnName);
+          if (this.selected.size === 0) {
+            this.table.clearSelection();
+            this.table.selectionUpdated();
+          } else {
+            // Get values from the selected bins
+            const selectedValues = Array.from(this.selected).map(key => {
+              const bin = this.originalData.bins.find(b => b.key === key);
+              return bin ? bin.value : null;
+            }).filter(value => value !== null);
+
+            // Update table selection using values rather than indices
+            this.table.selectByValues(this.columnName, selectedValues);
+            this.table.selectionUpdated();
+          }
         }
       });
   }

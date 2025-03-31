@@ -275,6 +275,10 @@ export class SorterTable {
         borderBottom: "1px solid #e0e0e0",
         background: "#f8f9fa",
         verticalAlign: "top",
+        maxWidth: "150px", // Set a maximum width for column titles
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+        whiteSpace: "nowrap",
       });
       headerRow.appendChild(th);
 
@@ -330,6 +334,9 @@ export class SorterTable {
 
       // Visualization
       const visDiv = document.createElement("div");
+      Object.assign(visDiv.style, {
+        marginTop: "4px", // Add margin to separate from column title
+      });
       th.appendChild(visDiv);
       visDiv.appendChild(this.visControllers[idx].getNode());
     });
@@ -539,12 +546,14 @@ export class SorterTable {
         .map((row) => row[vc.columnName])
         .filter((v) => v != null);
 
-      // If there's no selection, highlight all data
+      // If there's a selection, highlight the selected data; otherwise, highlight all data
       vc.highlightedData =
         this.selectedRows.size > 0
           ? selectedColumnData
           : this.data.map((row) => row[vc.columnName]);
-      vc.render();
+
+      // Update the histogram data
+      vc.updateData(vc.highlightedData);
     });
 
     // Notify about selection change
@@ -594,55 +603,48 @@ export class SorterTable {
   }
 
   handleHistogramSelection(selectedValues, sourceColumn) {
-    // Clear previous selection in the table
+    // Clear previous selection
     this.clearSelection();
 
-    // Find rows that match the selected values in the source column
+    // Find matching rows based on selected values
     const matchingRows = [];
-    const sourceData = selectedValues;
 
-    // For continuous data, handle range selection
-    const isRange =
-      selectedValues &&
-      typeof selectedValues[0] === "object" &&
-      "min" in selectedValues[0] &&
-      "max" in selectedValues[0];
-
+    // For each row in the data
     for (let i = 0; i < this.data.length; i++) {
       const rowValue = this.data[i][sourceColumn];
-
-      if (isRange) {
-        const range = selectedValues[0];
-        if (rowValue >= range.min && rowValue <= range.max) {
-          matchingRows.push(i);
-        }
-      } else if (selectedValues.includes(rowValue)) {
+      if (selectedValues.includes(rowValue)) {
         matchingRows.push(i);
       }
     }
 
-    // Select matching rows in the table UI
-    matchingRows.forEach((idx) => {
-      const rowElement = this.tableRenderer.tBody.children[idx];
+    // Select matching rows in the UI
+    matchingRows.forEach((index) => {
+      const rowElement = this.tableRenderer.tBody.children[index];
       if (rowElement) {
         this.selectRow(rowElement);
       }
-      this.selectedRows.add(idx);
     });
 
-    // Update all histogram visualizations with the selected data
-    this.visControllers.forEach((controller) => {
-      if (controller.columnName !== sourceColumn) {
-        const selectedColumnData = matchingRows.map(
-          (idx) => this.data[idx][controller.columnName]
-        );
-        controller.highlightedData = selectedColumnData;
-        controller.render();
+    // Update all visualizations with the new selection
+    this.selectionUpdated();
+  }
+
+  selectByValues(columnName, values) {
+    // Clear previous selection
+    this.clearSelection();
+
+    // Convert values to a Set for faster lookup
+    const valueSet = new Set(values);
+
+    // Find and select rows that match the values
+    this.data.forEach((row, index) => {
+      if (valueSet.has(row[columnName])) {
+        const rowElement = this.tableRenderer.tBody.children[index];
+        if (rowElement) {
+          this.selectRow(rowElement);
+        }
       }
     });
-
-    // Notify about selection change
-    this.selectionUpdated();
   }
 
   getNode() {
@@ -660,6 +662,9 @@ export class SorterTable {
       width: "35px",
       padding: "5px",
       borderRight: "1px solid #ccc",
+      display: "flex",
+      flexDirection: "column", // Arrange buttons vertically
+      alignItems: "center", // Center buttons horizontally
     });
     container.appendChild(sidebar);
 
@@ -670,6 +675,7 @@ export class SorterTable {
         cursor: "pointer",
         marginBottom: "15px",
         color: "gray",
+        fontSize: "20px", // Ensure consistent size
       });
       icon.addEventListener(
         "click",

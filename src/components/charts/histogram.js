@@ -10,10 +10,19 @@ export class Histogram extends BaseVisualization {
       maxOrdinalBins: 20,
       showLabelsBelow: false,
       unique: false, // New property to handle unique columns
+      skipDataLoading: false,
     };
 
     super({ ...histogramDefaults, ...config });
-    console.log("DuckDB Histogram initialized with config:", this.config);
+
+    // Ensure we use the table name from config
+    if (config.tableName) {
+      this.tableName = config.tableName;
+    }
+
+    console.log(
+      `[Histogram] Initialized with table: ${this.tableName}, column: ${this.config.column}`
+    );
 
     this.data = [];
     this.bins = [];
@@ -92,43 +101,111 @@ export class Histogram extends BaseVisualization {
     return this;
   }
 
-  async processDataWithDuckDB() {
-    const { column, unique } = this.config;
-    this.type = await this.dataProcessor.getTypeFromDuckDB(column);
-
-    if (unique) {
-      // For unique columns, create a single bin with total count
-      const countQuery = `SELECT COUNT(*) as count FROM ${this.tableName}`;
-      const result = await this.dataProcessor.query(countQuery);
-      const totalCount = Number(result[0].count);
-
-      this.bins = [
-        {
-          x0: "Unique",
-          x1: "Unique",
-          key: "Unique",
-          length: totalCount,
-        },
-      ];
-    } else {
-      this.bins = await this.dataProcessor.binDataWithDuckDB(
-        column,
-        this.type,
-        this.config.maxOrdinalBins
-      );
+  // Override initialize to prevent recreating the data processor
+  async initialize() {
+    console.log(
+      `[Histogram] Starting initialization with table: ${this.tableName}`
+    );
+    if (!this.initialized) {
+      this.createSvg();
     }
 
-    // Log bins for debugging
-    console.log(`Bins for column ${column} (type: ${this.type}):`, this.bins);
+    this.showLoading();
+    try {
+      // Don't recreate dataProcessor if it was passed in config
+      if (!this.dataProcessor && this.config.dataProcessor) {
+        console.log(
+          `[Histogram] Using existing dataProcessor with table: ${this.config.tableName}`
+        );
+        this.dataProcessor = this.config.dataProcessor;
+      } else if (!this.dataProcessor) {
+        await this.setupDuckDB();
+      }
 
-    this.xScale = this.createXScale();
-    this.yScale = this.createYScale();
+      // Ensure we use the correct table name
+      if (this.config.tableName) {
+        this.tableName = this.config.tableName;
+        console.log(
+          `[Histogram] Using table name from config: ${this.tableName}`
+        );
+      }
 
-    console.log("Histogram scales:", {
-      xDomain: this.xScale.domain(),
-      yDomain: this.yScale.domain(),
-      isUnique: unique,
-    });
+      // Load data only if needed
+      if (!this.config.skipDataLoading && this.config.dataSource) {
+        await this.loadData(this.config.dataSource, this.config.dataFormat);
+      }
+    } finally {
+      this.hideLoading();
+    }
+
+    console.log(
+      `[Histogram] Initialization complete with table: ${this.tableName}`
+    );
+    return this;
+  }
+
+  async processDataWithDuckDB() {
+    const { column, unique } = this.config;
+
+    // Verify table name is set correctly
+    console.log(
+      `[Histogram] Processing data for column ${column} using table: ${this.tableName}`
+    );
+
+    try {
+      // First list all available tables
+      const listTablesQuery = `SELECT name FROM sqlite_master WHERE type='table'`;
+      const tables = await this.dataProcessor.query(listTablesQuery);
+      console.log("[Histogram] Available tables:", tables);
+
+      // Check if table exists
+      if (!tables.some((t) => t.name === this.tableName)) {
+        console.error(
+          `[Histogram] Table ${this.tableName} not found in available tables!`
+        );
+        throw new Error(`Table ${this.tableName} does not exist`);
+      }
+
+      this.type = await this.dataProcessor.getTypeFromDuckDB(column);
+
+      if (unique) {
+        // For unique columns, create a single bin with total count
+        const countQuery = `SELECT COUNT(*) as count FROM ${this.tableName}`;
+        console.log(`[Histogram] Running count query: ${countQuery}`);
+        const result = await this.dataProcessor.query(countQuery);
+        const totalCount = Number(result[0].count);
+
+        this.bins = [
+          {
+            x0: "Unique",
+            x1: "Unique",
+            key: "Unique",
+            length: totalCount,
+          },
+        ];
+      } else {
+        this.bins = await this.dataProcessor.binDataWithDuckDB(
+          column,
+          this.type,
+          this.config.maxOrdinalBins
+        );
+      }
+
+      // Log bins for debugging
+      console.log(`Bins for column ${column} (type: ${this.type}):`, this.bins);
+
+      this.xScale = this.createXScale();
+      this.yScale = this.createYScale();
+
+      console.log("Histogram scales:", {
+        xDomain: this.xScale.domain(),
+        yDomain: this.yScale.domain(),
+        isUnique: unique,
+      });
+    } catch (error) {
+      console.error(`[Histogram] Error in processDataWithDuckDB: ${error}`);
+      throw error;
+    }
   }
 
   // Keep all your existing methods below, but remove duplicate methods
@@ -154,11 +231,15 @@ export class Histogram extends BaseVisualization {
     const selectedBins = Array.from(this.selectedBins);
     let query;
 
+    // Make sure we're using the correct table name
+    const tableName = this.tableName;
+    console.log(`[Histogram] Using table for query: ${tableName}`);
+
     if (this.type === "ordinal") {
       const values = selectedBins.map((bin) => `'${bin.key}'`).join(",");
       query = `
         SELECT *
-        FROM ${this.tableName}
+        FROM ${tableName}
         WHERE ${this.config.column} IN (${values})
       `;
     } else {
@@ -171,12 +252,12 @@ export class Histogram extends BaseVisualization {
 
       query = `
         SELECT *
-        FROM ${this.tableName}
+        FROM ${tableName}
         WHERE ${conditions}
       `;
     }
 
-    // Changed from this.duckdb.query to this.conn.query
+    console.log(`[Histogram] Running query on ${tableName}:`, query);
     const result = await this.dataProcessor.query(query);
     return result;
   }
@@ -372,7 +453,7 @@ export class Histogram extends BaseVisualization {
     // Log bins for debugging
     console.log("Drawing bars with bins:", bins);
 
-    // Remove existing bars
+    // Remove existing bars only, NOT the brush
     this.g.selectAll(".bar").remove();
 
     if (unique) {
@@ -399,8 +480,8 @@ export class Histogram extends BaseVisualization {
 
     // If we have highlighted data, draw the original data in grey first
     if (this.highlightedData) {
-      // Clear ALL existing elements first
-      this.g.selectAll(".brush, .bar").remove();
+      // Remove only bar elements, not brush
+      this.g.selectAll(".bar").remove();
 
       // Create bins for highlighted data first
       const highlightedBins = this.createBinsFromData(this.highlightedData);
@@ -452,11 +533,6 @@ export class Histogram extends BaseVisualization {
         .on("mouseover", (event, d) => this.handleMouseOver(event, d))
         .on("mouseout", (event, d) => this.handleMouseOut(event, d))
         .on("click", (event, d) => this.handleClick(event, d));
-
-      // Re-add brush last, ensuring proper cleanup
-      if (this.config.selectionMode === "drag") {
-        this.setupBrush();
-      }
     } else {
       // Original drawing code for normal state
       const bars = this.g
@@ -736,6 +812,7 @@ export class Histogram extends BaseVisualization {
             WHERE rowid IN (${indices.join(",")})
         `;
 
+      console.log(`[Histogram] Highlight query on ${this.tableName}:`, query);
       const highlightedResult = await this.dataProcessor.query(query);
       console.log("Highlighted query result:", highlightedResult); // Debug log
 
@@ -837,6 +914,10 @@ export class Histogram extends BaseVisualization {
             WHERE "${this.config.column}" IN (${formattedValues.join(",")})
         `;
 
+      console.log(
+        `[Histogram] Highlight by value query on ${this.tableName}:`,
+        query
+      );
       const highlightedResult = await this.dataProcessor.query(query);
 
       // Extract values directly from the result array
@@ -872,5 +953,76 @@ export class Histogram extends BaseVisualization {
   getNode() {
     console.log("Returning SVG node:", this.svg.node());
     return this.svg.node();
+  }
+
+  /**
+   * Update the histogram with new data from a natural language query
+   * @param {Array} data - New data to display
+   */
+  async updateWithData(data) {
+    if (!data || !Array.isArray(data) || data.length === 0) {
+      console.warn("No valid data provided for histogram update");
+      return;
+    }
+
+    this.showLoading();
+
+    try {
+      // Set the new data in the processor
+      if (this.dataProcessor) {
+        // Drop existing table if necessary
+        await this.dataProcessor.dropTable();
+
+        // Load the new data
+        await this.dataProcessor.loadData(data, "json");
+
+        // Re-bin the data
+        const column = this.config.column;
+        const bins = await this.generateBins(column);
+
+        // Update the visualization with new bins
+        await this.update(bins);
+      }
+    } catch (error) {
+      console.error("Error updating histogram with query results:", error);
+    } finally {
+      this.hideLoading();
+    }
+  }
+
+  /**
+   * Generate bins for the histogram
+   * @param {string} column - Column to bin
+   * @returns {Promise<Array>} - Binned data
+   */
+  async generateBins(column) {
+    try {
+      // Determine the column type to decide the binning approach
+      const columnTypeQuery = `
+        SELECT typeof(${column}) as type 
+        FROM ${this.tableName} 
+        WHERE ${column} IS NOT NULL 
+        LIMIT 1
+      `;
+      const typeResult = await this.query(columnTypeQuery);
+      const type =
+        typeResult.length > 0 ? typeResult[0].type.toLowerCase() : null;
+
+      let binType = "continuous";
+      if (type && (type.includes("varchar") || type.includes("text"))) {
+        binType = "ordinal";
+      } else if (
+        type &&
+        (type.includes("date") || type.includes("timestamp"))
+      ) {
+        binType = "date";
+      }
+
+      // Use DuckDB's binning capabilities
+      return await this.dataProcessor.binDataWithDuckDB(column, binType);
+    } catch (error) {
+      console.error("Error generating bins:", error);
+      throw error;
+    }
   }
 }

@@ -49,26 +49,43 @@ export class BaseSmallMultiples extends BaseVisualization {
       return;
     }
 
-    console.log("[SmallMultiples] Creating charts layout:", {
-      numColumns: columns.length,
-      chartWidth,
-      chartHeight,
-      containerWidth: this.config.width,
-    });
+    // Ensure data is loaded only once
+    if (this.dataProcessor && !(await this.dataProcessor.tableExists())) {
+      console.log("[SmallMultiples] Loading data once for all charts");
+      if (this.config.dataSource) {
+        await this.dataProcessor.loadData(
+          this.config.dataSource,
+          this.config.dataFormat
+        );
+      }
+    }
 
+    console.log(`[SmallMultiples] Parent table name: ${this.tableName}`);
+
+    try {
+      const listTablesQuery = `SELECT name FROM sqlite_master WHERE type='table'`;
+      const tables = await this.dataProcessor.query(listTablesQuery);
+      console.log("[SmallMultiples] Available tables:", tables);
+
+      // Verify data in our table
+      const countQuery = `SELECT COUNT(*) as count FROM ${this.tableName}`;
+      const count = await this.dataProcessor.query(countQuery);
+      console.log(
+        `[SmallMultiples] Table ${this.tableName} has ${count[0].count} rows`
+      );
+    } catch (error) {
+      console.error(`[SmallMultiples] Error checking tables: ${error}`);
+    }
+
+    // Calculate layout
     const containerWidth = this.config.width;
     const effectiveWidth = chartWidth + gap.horizontal;
     const chartsPerRow = Math.floor(containerWidth / effectiveWidth);
     const numRows = Math.ceil(columns.length / chartsPerRow);
 
-    console.log("[SmallMultiples] Layout calculated:", {
-      chartsPerRow,
-      numRows,
-      effectiveWidth,
-    });
-
     this.charts = [];
 
+    // Create all charts sharing the same data processor
     for (let i = 0; i < columns.length; i++) {
       const column = columns[i];
       const row = Math.floor(i / chartsPerRow);
@@ -78,14 +95,13 @@ export class BaseSmallMultiples extends BaseVisualization {
       const yOffset = row * (chartHeight + gap.vertical);
 
       console.log(
-        `[SmallMultiples] Creating chart ${i + 1}/${columns.length}:`,
-        {
-          column,
-          position: { row, col },
-          offset: { x: xOffset, y: yOffset },
-        }
+        `[SmallMultiples] Creating chart ${
+          i + 1
+        } (column: ${column}) with shared table: ${this.tableName}`
       );
 
+      // Create a copy of the dataProcessor to avoid issues
+      // This is crucial - we want to keep the same underlying DB connection and table
       const chartConfig = new ChartConfig({
         column: column,
         width: chartWidth - this.config.margin.left - this.config.margin.right,
@@ -93,11 +109,10 @@ export class BaseSmallMultiples extends BaseVisualization {
           chartHeight - this.config.margin.top - this.config.margin.bottom,
         colors: this.config.colors,
         selectionMode: this.config.selectionMode,
-        dataSource: this.config.dataSource,
-        dataFormat: this.config.dataFormat,
-        dataProcessor: this.dataProcessor,
+        dataProcessor: this.dataProcessor, // Pass the same processor
+        tableName: this.tableName, // Set the exact same table name
+        skipDataLoading: true, // Skip data loading
         axis: this.config.showAxis,
-        tableName: this.tableName,
         margin: {
           ...this.config.margin,
           top: showTitle ? 20 : this.config.margin.top,
@@ -105,6 +120,9 @@ export class BaseSmallMultiples extends BaseVisualization {
       });
 
       const chart = new ChartClass(chartConfig);
+
+      // Force the table name to be the same as parent
+      chart.tableName = this.tableName;
 
       const chartGroup = this.g
         .append("g")
@@ -130,7 +148,14 @@ export class BaseSmallMultiples extends BaseVisualization {
           `translate(${this.config.margin.left},${this.config.margin.top})`
         );
 
+      // Initialize chart with content group
       chart.g = contentGroup;
+
+      // Log table name before initialization
+      console.log(
+        `[SmallMultiples] Chart ${i + 1} using table: ${chart.tableName}`
+      );
+
       await chart.initialize();
       await chart.update();
 
@@ -161,7 +186,16 @@ export class BaseSmallMultiples extends BaseVisualization {
             const selectedValues = selectedData.map(
               (row) => row[otherChart.config.column]
             );
-            await otherChart.highlightDataByValue(selectedValues);
+
+            // Filter out null/undefined values and format numbers properly
+            const validValues = selectedValues.filter((v) => v != null);
+            const formattedValues = validValues
+              .map((v) => (typeof v === "number" ? v : `'${v}'`))
+              .join(",");
+
+            if (formattedValues.length > 0) {
+              await otherChart.highlightDataByValue(validValues);
+            }
           }
         }
 
@@ -183,14 +217,17 @@ export class BaseSmallMultiples extends BaseVisualization {
       if (chart !== sourceChart) {
         if (self.selectedData?.length > 0) {
           const column = chart.config.column;
-          const filterValues = this.selectedData.map(
-            (item) => item[self.config.columns[0]]
-          );
+          const filterValues = this.selectedData
+            .map((item) => item[self.config.columns[0]])
+            .filter((v) => v != null);
 
           if (filterValues.length > 0) {
-            const filterClause = `${
-              self.config.columns[0]
-            } IN ('${filterValues.join("','")}')`;
+            // Format the filter clause properly based on value type
+            const formattedValues = filterValues
+              .map((v) => (typeof v === "number" ? v : `'${v}'`))
+              .join(",");
+
+            const filterClause = `${self.config.columns[0]} IN (${formattedValues})`;
             const filteredData = await this.dataProcessor.getFilteredData(
               filterClause
             );
