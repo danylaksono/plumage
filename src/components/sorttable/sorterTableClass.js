@@ -1,6 +1,6 @@
 import * as d3 from "npm:d3";
 import { DuckDBDataProcessor } from "../_base/duckdb-processor.js";
-import { BinningService } from "./BinningService.js";
+// import { BinningService } from "./BinningService.js";
 
 export class sorterTable {
   constructor(data, columnNames, changed, options = {}) {
@@ -44,13 +44,13 @@ export class sorterTable {
     });
 
     // Initialize the BinningService
-    this.binningService = new BinningService({
-      maxOrdinalBins: options.maxOrdinalBins || 12,
-      continuousBinMethod: options.continuousBinMethod || "scott",
-      dateInterval: options.dateInterval || "day",
-      minBinSize: options.minBinSize || 5,
-      customThresholds: options.customThresholds || null,
-    });
+    // this.binningService = new BinningService({
+    //   maxOrdinalBins: options.maxOrdinalBins || 12,
+    //   continuousBinMethod: options.continuousBinMethod || "scott",
+    //   dateInterval: options.dateInterval || "day",
+    //   minBinSize: options.minBinSize || 5,
+    //   customThresholds: options.customThresholds || null,
+    // });
 
     this.inferColumnTypesAndThresholds(data);
 
@@ -60,7 +60,7 @@ export class sorterTable {
 
     this.initialColumns = JSON.parse(JSON.stringify(this.columns));
 
-    console.log("Initial columns:", this.columns);
+    // console.log("Initial columns:", this.columns);
 
     this.changed = changed;
     this._isUndoing = false;
@@ -188,7 +188,7 @@ export class sorterTable {
         });
       }
 
-      console.log(`Initialized ${this.workerPool.length} DuckDB workers`);
+      // console.log(`Initialized ${this.workerPool.length} DuckDB workers`);
 
       // Ensure tables are correctly set up
       await this.synchronizeWorkerTables();
@@ -517,10 +517,10 @@ export class sorterTable {
   }
 
   async inferColumnTypesAndThresholds(data) {
-    if (!this.binningService) {
-      console.error("BinningService not initialized");
-      return;
-    }
+    // if (!this.binningService) {
+    //   console.error("BinningService not initialized");
+    //   return;
+    // }
 
     const db = await this.ensureDuckDB();
 
@@ -1540,14 +1540,19 @@ function SortController(colName, update) {
 
   // Toggle function
   this.toggleDirection = () => {
-    if (sorting === "none" || sorting === "down") {
+    if (sorting === "none") {
       sorting = "up";
-      icon.classList.remove("fa-sort-down", "fa-sort");
+      icon.classList.remove("fa-sort", "fa-sort-down");
       icon.classList.add("fa-sort-up");
-    } else {
+    } else if (sorting === "up") {
       sorting = "down";
       icon.classList.remove("fa-sort-up", "fa-sort");
       icon.classList.add("fa-sort-down");
+    } else {
+      // sorting === "down"
+      sorting = "none";
+      icon.classList.remove("fa-sort-up", "fa-sort-down");
+      icon.classList.add("fa-sort");
     }
   };
 

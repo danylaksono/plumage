@@ -204,86 +204,202 @@ export class DuckDBDataProcessor {
    * Bins data from a DuckDB table based on the column type.
    * For continuous data, creates equal-width bins between 5th and 95th percentiles.
    */
+  // async binDataWithDuckDB(column, type, maxOrdinalBins = 20) {
+  //   const escapedColumn = this.safeColumnName(column);
+  //   let query;
+  //   switch (type) {
+  //     case "continuous":
+  //       // Get column type for proper casting
+  //       const typeQuery = `SELECT typeof(${escapedColumn}) as col_type
+  //                       FROM ${this.tableName}
+  //                       WHERE ${escapedColumn} IS NOT NULL
+  //                       LIMIT 1`;
+  //       const typeResult = await this.logQuery(typeQuery, "Get Column Type");
+  //       const typeArray = typeResult.toArray();
+  //       const colType = typeArray.length > 0 ? typeArray[0].col_type : null;
+  //       if (!colType) {
+  //         console.warn(
+  //           `Column ${escapedColumn} has no non-null values, defaulting to ordinal type.`
+  //         );
+  //         return this.binDataWithDuckDB(column, "ordinal", maxOrdinalBins);
+  //       }
+  //       // Create 10 equal-width bins between 5th and 95th percentiles
+  //       query = `
+  //       WITH stats AS (
+  //         SELECT
+  //           PERCENTILE_CONT(0.05) WITHIN GROUP (ORDER BY ${escapedColumn}) as p05,
+  //           PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY ${escapedColumn}) as p95
+  //         FROM ${this.tableName}
+  //         WHERE ${escapedColumn} IS NOT NULL
+  //       ),
+  //       numbers AS (
+  //         SELECT unnest(generate_series(0, 10))::DOUBLE as bin_number
+  //       ),
+  //       bin_edges AS (
+  //         SELECT
+  //           p05,
+  //           p95,
+  //           (p95 - p05) / 10.0 as bin_width,
+  //           bin_number
+  //         FROM stats, numbers
+  //       )
+  //       SELECT
+  //         CAST(p05 + (bin_number * bin_width) AS DOUBLE) as x0,
+  //         CAST(p05 + ((bin_number + 1.0) * bin_width) AS DOUBLE) as x1,
+  //         COUNT(*) as length
+  //       FROM ${this.tableName}
+  //       CROSS JOIN bin_edges
+  //       WHERE ${escapedColumn} IS NOT NULL
+  //         AND ${escapedColumn} >= p05
+  //         AND ${escapedColumn} <= p95
+  //         AND ${escapedColumn} >= CAST(p05 + (bin_number * bin_width) AS DOUBLE)
+  //         AND ${escapedColumn} < CAST(p05 + ((bin_number + 1.0) * bin_width) AS DOUBLE)
+  //       GROUP BY bin_number, p05, bin_width
+  //       ORDER BY x0;
+  //     `;
+  //       break;
+  //     case "date":
+  //       query = `
+  //       SELECT
+  //         date_trunc('day', ${escapedColumn}) as x0,
+  //         date_trunc('day', ${escapedColumn}) + INTERVAL '1 day' as x1,
+  //         COUNT(*) as length
+  //       FROM ${this.tableName}
+  //       WHERE ${escapedColumn} IS NOT NULL
+  //       GROUP BY date_trunc('day', ${escapedColumn})
+  //       ORDER BY x0
+  //     `;
+  //       break;
+  //     case "ordinal":
+  //       query = `
+  //       SELECT
+  //         ${escapedColumn} as key,
+  //         ${escapedColumn} as x0,
+  //         ${escapedColumn} as x1,
+  //         COUNT(*) as length
+  //       FROM ${this.tableName}
+  //       WHERE ${escapedColumn} IS NOT NULL
+  //       GROUP BY ${escapedColumn}
+  //       ORDER BY length DESC
+  //       LIMIT ${maxOrdinalBins}
+  //     `;
+  //       break;
+  //   }
+
+  //   console.log("Executing binning query:", {
+  //     column,
+  //     type,
+  //     query,
+  //   });
+
+  //   const result = await this.conn.query(query);
+  //   const binned = result.toArray().map((row) => ({
+  //     ...row,
+  //     x0: type === "date" ? new Date(row.x0) : row.x0,
+  //     x1: type === "date" ? new Date(row.x1) : row.x1,
+  //   }));
+
+  //   console.log("Binning result:", binned);
+  //   return binned;
+  // }
+
+  /**
+   * Bins data from a DuckDB table based on the column type.
+   * Uses DuckDB's built-in histogram function for continuous data.
+   */
   async binDataWithDuckDB(column, type, maxOrdinalBins = 20) {
     const escapedColumn = this.safeColumnName(column);
+
+    // Use DuckDB's native histogram function for continuous data
+    if (type === "continuous") {
+      // Get column type for proper casting
+      const typeQuery = `SELECT typeof(${escapedColumn}) as col_type
+                    FROM ${this.tableName}
+                    WHERE ${escapedColumn} IS NOT NULL
+                    LIMIT 1`;
+      const typeResult = await this.logQuery(typeQuery, "Get Column Type");
+      const typeArray = typeResult.toArray();
+      const colType = typeArray.length > 0 ? typeArray[0].col_type : null;
+
+      if (!colType) {
+        console.warn(
+          `Column ${escapedColumn} has no non-null values, defaulting to ordinal type.`
+        );
+        return this.binDataWithDuckDB(column, "ordinal", maxOrdinalBins);
+      }
+
+      // Use histogram function with filtering to exclude extreme outliers
+      const query = `
+      WITH stats AS (
+        SELECT 
+          PERCENTILE_CONT(0.05) WITHIN GROUP (ORDER BY ${escapedColumn}) as p05,
+          PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY ${escapedColumn}) as p95
+        FROM ${this.tableName}
+        WHERE ${escapedColumn} IS NOT NULL
+      )
+      SELECT histogram(${escapedColumn}) AS hist
+      FROM ${this.tableName}, stats
+      WHERE ${escapedColumn} IS NOT NULL
+        AND ${escapedColumn} >= p05 
+        AND ${escapedColumn} <= p95
+    `;
+
+      console.log("Executing continuous binning query:", query);
+
+      const histResult = await this.conn.query(query);
+      const histData = histResult.toArray()[0]?.hist;
+
+      if (!histData) {
+        console.warn(`Column ${escapedColumn} has no histogram data`);
+        return [];
+      }
+
+      // Convert histogram output to the expected format
+      const bins = Object.entries(histData).map(([key, count]) => ({
+        key: key === "null" ? null : parseFloat(key),
+        x0: key === "null" ? null : parseFloat(key),
+        x1: key === "null" ? null : parseFloat(key),
+        length: count,
+      }));
+
+      // Sort by key for continuous data
+      bins.sort((a, b) => {
+        if (a.key === null) return -1;
+        if (b.key === null) return 1;
+        return a.key - b.key;
+      });
+
+      console.log("Continuous binning result:", bins);
+      return bins;
+    }
+
+    // Handle date and ordinal types with existing approach
     let query;
-    switch (type) {
-      case "continuous":
-        // Get column type for proper casting
-        const typeQuery = `SELECT typeof(${escapedColumn}) as col_type
-                        FROM ${this.tableName}
-                        WHERE ${escapedColumn} IS NOT NULL
-                        LIMIT 1`;
-        const typeResult = await this.logQuery(typeQuery, "Get Column Type");
-        const typeArray = typeResult.toArray();
-        const colType = typeArray.length > 0 ? typeArray[0].col_type : null;
-        if (!colType) {
-          console.warn(
-            `Column ${escapedColumn} has no non-null values, defaulting to ordinal type.`
-          );
-          return this.binDataWithDuckDB(column, "ordinal", maxOrdinalBins);
-        }
-        // Create 10 equal-width bins between 5th and 95th percentiles
-        query = `
-        WITH stats AS (
-          SELECT 
-            PERCENTILE_CONT(0.05) WITHIN GROUP (ORDER BY ${escapedColumn}) as p05,
-            PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY ${escapedColumn}) as p95
-          FROM ${this.tableName}
-          WHERE ${escapedColumn} IS NOT NULL
-        ),
-        numbers AS (
-          SELECT unnest(generate_series(0, 10))::DOUBLE as bin_number
-        ),
-        bin_edges AS (
-          SELECT 
-            p05,
-            p95,
-            (p95 - p05) / 10.0 as bin_width,
-            bin_number
-          FROM stats, numbers
-        )
-        SELECT
-          CAST(p05 + (bin_number * bin_width) AS DOUBLE) as x0,
-          CAST(p05 + ((bin_number + 1.0) * bin_width) AS DOUBLE) as x1,
-          COUNT(*) as length
-        FROM ${this.tableName}
-        CROSS JOIN bin_edges
-        WHERE ${escapedColumn} IS NOT NULL
-          AND ${escapedColumn} >= p05 
-          AND ${escapedColumn} <= p95
-          AND ${escapedColumn} >= CAST(p05 + (bin_number * bin_width) AS DOUBLE)
-          AND ${escapedColumn} < CAST(p05 + ((bin_number + 1.0) * bin_width) AS DOUBLE)
-        GROUP BY bin_number, p05, bin_width
-        ORDER BY x0;
-      `;
-        break;
-      case "date":
-        query = `
-        SELECT
-          date_trunc('day', ${escapedColumn}) as x0,
-          date_trunc('day', ${escapedColumn}) + INTERVAL '1 day' as x1,
-          COUNT(*) as length
-        FROM ${this.tableName}
-        WHERE ${escapedColumn} IS NOT NULL
-        GROUP BY date_trunc('day', ${escapedColumn})
-        ORDER BY x0
-      `;
-        break;
-      case "ordinal":
-        query = `
-        SELECT
-          ${escapedColumn} as key,
-          ${escapedColumn} as x0,
-          ${escapedColumn} as x1,
-          COUNT(*) as length
-        FROM ${this.tableName}
-        WHERE ${escapedColumn} IS NOT NULL
-        GROUP BY ${escapedColumn}
-        ORDER BY length DESC
-        LIMIT ${maxOrdinalBins}
-      `;
-        break;
+
+    if (type === "date") {
+      query = `
+      SELECT
+        date_trunc('day', ${escapedColumn}) as x0,
+        date_trunc('day', ${escapedColumn}) + INTERVAL '1 day' as x1,
+        COUNT(*) as length
+      FROM ${this.tableName}
+      WHERE ${escapedColumn} IS NOT NULL
+      GROUP BY date_trunc('day', ${escapedColumn})
+      ORDER BY x0
+    `;
+    } else if (type === "ordinal") {
+      query = `
+      SELECT
+        ${escapedColumn} as key,
+        ${escapedColumn} as x0,
+        ${escapedColumn} as x1,
+        COUNT(*) as length
+      FROM ${this.tableName}
+      WHERE ${escapedColumn} IS NOT NULL
+      GROUP BY ${escapedColumn}
+      ORDER BY length DESC
+      LIMIT ${maxOrdinalBins}
+    `;
     }
 
     console.log("Executing binning query:", {
